@@ -15,6 +15,7 @@ interface StatusBarProps {
   isConnected: boolean;
   registrationMetrics: RegistrationMetrics;
   featureCount: number;
+  boundariesCount?: number;
   boundaryPointCount: number;
   isDrawingBoundary: boolean;
   minInliersThreshold: number;
@@ -25,6 +26,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   isConnected,
   registrationMetrics,
   featureCount,
+  boundariesCount,
   boundaryPointCount,
   isDrawingBoundary,
   minInliersThreshold,
@@ -113,11 +115,15 @@ export const StatusBar: React.FC<StatusBarProps> = ({
 
         {/* Boundary Status */}
         <div className="flex items-center gap-1 text-slate-400 text-[11px]">
-          <MapPin className="w-3 h-3 text-red-400" />
-          <span>Boundary:</span>
+          <MapPin className="w-3 h-3 text-rose-400" />
+          <span>Boundaries:</span>
           {isDrawingBoundary ? (
             <span className="font-semibold text-amber-400 animate-pulse">
               DRAWING ({boundaryPointCount} pts)
+            </span>
+          ) : boundariesCount !== undefined && boundariesCount > 0 ? (
+            <span className="font-semibold text-emerald-400">
+              {boundariesCount} LAYER{boundariesCount === 1 ? '' : 'S'} ({boundaryPointCount} pts)
             </span>
           ) : boundaryPointCount > 0 ? (
             <span className="font-semibold text-emerald-400">

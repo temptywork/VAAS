@@ -1,5 +1,5 @@
-import React, { useState, useRef } from 'react';
-import { FeatureType } from '../types';
+import React, { useState, useRef, useEffect } from 'react';
+import { FeatureType, ExerciseFeature } from '../types';
 import { FEATURE_LIBRARY } from '../data/featureDefinitions';
 import {
   Crosshair,
@@ -10,6 +10,11 @@ import {
   RotateCw,
   Layers,
   Image as ImageIcon,
+  Trash2,
+  Search,
+  Eye,
+  ListFilter,
+  AlertCircle,
 } from 'lucide-react';
 
 export interface CustomPlacementOptions {
@@ -29,6 +34,9 @@ interface AddFeatureModalProps {
     options?: CustomPlacementOptions
   ) => void;
   existingCountByType: Record<string, number>;
+  plottedFeatures?: ExerciseFeature[];
+  onDeleteFeature?: (id: string) => void;
+  onDeleteAllFeatures?: () => void;
 }
 
 const PRESET_SAMPLE_SVGS = [
@@ -79,13 +87,25 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
   onClose,
   onSelectFeatureForPlacement,
   existingCountByType,
+  plottedFeatures = [],
+  onDeleteFeature,
+  onDeleteAllFeatures,
 }) => {
-  const [activeTab, setActiveTab] = useState<'standard' | 'custom'>('standard');
+  const [activeTab, setActiveTab] = useState<'standard' | 'custom' | 'plotted'>('standard');
   const [selectedType, setSelectedType] = useState<FeatureType>('tank');
   const [label, setLabel] = useState<string>('');
   const [rotation, setRotation] = useState<number>(0);
   const [scale, setScale] = useState<number>(1.0);
   const [customColor, setCustomColor] = useState<string>('#38bdf8');
+  const [plottedSearch, setPlottedSearch] = useState<string>('');
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (confirmDeleteAll) {
+      const timer = setTimeout(() => setConfirmDeleteAll(false), 3500);
+      return () => clearTimeout(timer);
+    }
+  }, [confirmDeleteAll]);
 
   // Custom Image State (SVG or JPG/PNG)
   const [customImageDataUrl, setCustomImageDataUrl] = useState<string | null>(null);
@@ -97,6 +117,15 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
   if (!isOpen) return null;
 
   const currentDef = FEATURE_LIBRARY[selectedType];
+
+  const filteredPlotted = plottedFeatures.filter((f) => {
+    if (!plottedSearch.trim()) return true;
+    const term = plottedSearch.toLowerCase();
+    return (
+      f.label.toLowerCase().includes(term) ||
+      f.type.toLowerCase().includes(term)
+    );
+  });
 
   const handleSelectType = (type: FeatureType) => {
     setSelectedType(type);
@@ -192,19 +221,19 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
           </button>
         </div>
 
-        {/* Tab Switcher: Standard Military Symbols vs Custom SVG / JPG Symbol */}
+        {/* Tab Switcher: Standard vs Custom vs Plotted Features */}
         <div className="flex border-b border-slate-800 bg-slate-950/50">
           <button
             type="button"
             onClick={() => setActiveTab('standard')}
-            className={`flex-1 py-2.5 px-4 font-mono text-xs font-semibold flex items-center justify-center gap-2 border-b-2 transition ${
+            className={`flex-1 py-2.5 px-3 font-mono text-[11px] font-semibold flex items-center justify-center gap-1.5 border-b-2 transition ${
               activeTab === 'standard'
                 ? 'border-sky-500 text-sky-300 bg-slate-900/60'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
-            <span>Standard Military Symbols (8)</span>
+            <span>Standard (8)</span>
           </button>
           <button
             type="button"
@@ -214,14 +243,32 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
                 handleSelectPresetSvg(PRESET_SAMPLE_SVGS[0]);
               }
             }}
-            className={`flex-1 py-2.5 px-4 font-mono text-xs font-semibold flex items-center justify-center gap-2 border-b-2 transition ${
+            className={`flex-1 py-2.5 px-3 font-mono text-[11px] font-semibold flex items-center justify-center gap-1.5 border-b-2 transition ${
               activeTab === 'custom'
                 ? 'border-sky-500 text-sky-300 bg-slate-900/60'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
             <ImageIcon className="w-3.5 h-3.5" />
-            <span>Custom Symbol (SVG / JPG / PNG)</span>
+            <span>Custom Symbol</span>
+          </button>
+          <button
+            type="button"
+            id="tab-plotted-features"
+            onClick={() => setActiveTab('plotted')}
+            className={`flex-1 py-2.5 px-3 font-mono text-[11px] font-semibold flex items-center justify-center gap-1.5 border-b-2 transition ${
+              activeTab === 'plotted'
+                ? 'border-emerald-500 text-emerald-300 bg-slate-900/60'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <ListFilter className="w-3.5 h-3.5" />
+            <span>Plotted ({plottedFeatures.length})</span>
+            {plottedFeatures.length > 0 && (
+              <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] px-1.5 rounded-full font-bold">
+                {plottedFeatures.length}
+              </span>
+            )}
           </button>
         </div>
 
@@ -274,7 +321,7 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
                   })}
               </div>
             </>
-          ) : (
+          ) : activeTab === 'custom' ? (
             <>
               {/* Custom SVG / JPG Upload Section */}
               <div className="space-y-3">
@@ -401,77 +448,245 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
                 </div>
               </div>
             </>
+          ) : (
+            /* Plotted Features on Canvas Tab */
+            <div className="space-y-3">
+              {/* Search & Bulk Actions Bar */}
+              <div className="flex items-center justify-between gap-2">
+                <div className="relative flex-1">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={plottedSearch}
+                    onChange={(e) => setPlottedSearch(e.target.value)}
+                    placeholder="Search plotted symbols by label or type..."
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 font-mono text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
+                  />
+                </div>
+
+                {plottedFeatures.length > 0 && onDeleteAllFeatures && (
+                  !confirmDeleteAll ? (
+                    <button
+                      type="button"
+                      id="btn-plotted-clear-all"
+                      onClick={() => setConfirmDeleteAll(true)}
+                      className="flex items-center gap-1.5 text-[11px] font-mono text-rose-400 hover:text-rose-300 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/50 px-2.5 py-1.5 rounded-lg transition shrink-0"
+                      title="Delete all features plotted on canvas"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Clear All ({plottedFeatures.length})</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      id="btn-plotted-confirm-clear-all"
+                      onClick={() => {
+                        onDeleteAllFeatures();
+                        setConfirmDeleteAll(false);
+                      }}
+                      className="flex items-center gap-1.5 text-[11px] font-mono text-white bg-rose-600 hover:bg-rose-500 font-bold px-2.5 py-1.5 rounded-lg transition shrink-0 animate-pulse shadow-md"
+                      title="Click again to confirm clearing all features"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Confirm Clear All ({plottedFeatures.length})?</span>
+                    </button>
+                  )
+                )}
+              </div>
+
+              {/* Plotted Features List */}
+              {plottedFeatures.length === 0 ? (
+                <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-8 text-center space-y-3">
+                  <div className="w-12 h-12 rounded-full bg-slate-800/60 flex items-center justify-center mx-auto text-slate-500 border border-slate-700/60">
+                    <Layers className="w-6 h-6" />
+                  </div>
+                  <div className="space-y-1">
+                    <h4 className="font-mono font-bold text-slate-300 text-xs uppercase tracking-wide">
+                      No Features Plotted on Canvas
+                    </h4>
+                    <p className="text-[11px] text-slate-400 max-w-xs mx-auto">
+                      Switch to the "Standard" or "Custom Symbol" tabs to select a military symbol and anchor it onto the live camera stream.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('standard')}
+                    className="inline-flex items-center gap-1.5 text-xs bg-sky-600 hover:bg-sky-500 text-white font-medium px-3 py-1.5 rounded transition shadow"
+                  >
+                    <Crosshair className="w-3.5 h-3.5" />
+                    <span>Select Symbol to Plot</span>
+                  </button>
+                </div>
+              ) : filteredPlotted.length === 0 ? (
+                <div className="bg-slate-950/40 border border-slate-800 rounded-lg p-6 text-center text-slate-400 font-mono text-xs">
+                  No plotted features matching "{plottedSearch}"
+                </div>
+              ) : (
+                <div className="space-y-1.5 max-h-[50vh] overflow-y-auto pr-1">
+                  {filteredPlotted.map((feat) => {
+                    const def = FEATURE_LIBRARY[feat.type] || FEATURE_LIBRARY.tank;
+                    return (
+                      <div
+                        key={feat.id}
+                        className="bg-slate-950/70 border border-slate-800 hover:border-slate-700 rounded-lg p-2.5 flex items-center justify-between gap-3 transition"
+                      >
+                        {/* Left: Thumbnail & Details */}
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div
+                            className="w-10 h-10 rounded bg-slate-900 border border-slate-700 flex items-center justify-center shrink-0 p-1 overflow-hidden"
+                            style={{ borderColor: feat.color || def.color }}
+                          >
+                            {feat.customImage ? (
+                              <img
+                                src={feat.customImage}
+                                alt={feat.label}
+                                className="w-full h-full object-contain"
+                              />
+                            ) : (
+                              <span className="font-mono text-xs font-bold" style={{ color: feat.color || def.color }}>
+                                {def.symbol}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono font-bold text-xs text-slate-100 truncate">
+                                {feat.label}
+                              </span>
+                              <span
+                                className="text-[9px] font-mono px-1.5 py-0.2 rounded border uppercase"
+                                style={{
+                                  borderColor: feat.color || def.color,
+                                  color: feat.color || def.color,
+                                  backgroundColor: 'rgba(15, 23, 42, 0.6)',
+                                }}
+                              >
+                                {def.name}
+                              </span>
+                            </div>
+                            <div className="font-mono text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
+                              <span>Pos: ({Math.round(feat.x)}, {Math.round(feat.y)})</span>
+                              <span>•</span>
+                              <span>Rot: {feat.rotation || 0}°</span>
+                              <span>•</span>
+                              <span>Scale: {(feat.scale || 1).toFixed(1)}x</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Right: Quick Delete Action */}
+                        <button
+                          type="button"
+                          onClick={() => onDeleteFeature && onDeleteFeature(feat.id)}
+                          className="flex items-center gap-1 text-xs text-rose-400 hover:text-white hover:bg-rose-900/60 border border-rose-900/30 hover:border-rose-700 px-2.5 py-1.5 rounded transition font-mono shrink-0"
+                          title="Delete this feature from canvas"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span className="hidden sm:inline">Delete</span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           )}
 
-          {/* Common Parameters: Tactical Label, Orientation, Scale */}
-          <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-3 space-y-3">
-            <div>
-              <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1">
-                Tactical Label (e.g. SIM TANK 01, RECON 02)
-              </label>
-              <input
-                type="text"
-                value={label}
-                onChange={(e) => setLabel(e.target.value)}
-                placeholder={activeTab === 'standard' ? currentDef.defaultLabel : 'CUSTOM MARK'}
-                className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-sky-500"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
+          {/* Common Parameters: Tactical Label, Orientation, Scale (shown for standard/custom placement) */}
+          {activeTab !== 'plotted' && (
+            <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-3 space-y-3">
               <div>
-                <div className="flex justify-between text-[11px] font-mono text-slate-400 mb-1">
-                  <span>Orientation</span>
-                  <span className="text-sky-300 font-bold">{rotation}°</span>
-                </div>
+                <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1">
+                  Tactical Label (e.g. SIM TANK 01, RECON 02)
+                </label>
                 <input
-                  type="range"
-                  min="0"
-                  max="360"
-                  step="15"
-                  value={rotation}
-                  onChange={(e) => setRotation(parseInt(e.target.value))}
-                  className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
+                  type="text"
+                  value={label}
+                  onChange={(e) => setLabel(e.target.value)}
+                  placeholder={activeTab === 'standard' ? currentDef.defaultLabel : 'CUSTOM MARK'}
+                  className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-sky-500"
                 />
               </div>
 
-              <div>
-                <div className="flex justify-between text-[11px] font-mono text-slate-400 mb-1">
-                  <span>Symbol Scale</span>
-                  <span className="text-sky-300 font-bold">{scale.toFixed(1)}x</span>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="flex justify-between text-[11px] font-mono text-slate-400 mb-1">
+                    <span>Orientation</span>
+                    <span className="text-sky-300 font-bold">{rotation}°</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="360"
+                    step="15"
+                    value={rotation}
+                    onChange={(e) => setRotation(parseInt(e.target.value))}
+                    className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
+                  />
                 </div>
-                <input
-                  type="range"
-                  min="0.5"
-                  max="2.5"
-                  step="0.1"
-                  value={scale}
-                  onChange={(e) => setScale(parseFloat(e.target.value))}
-                  className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
-                />
+
+                <div>
+                  <div className="flex justify-between text-[11px] font-mono text-slate-400 mb-1">
+                    <span>Symbol Scale</span>
+                    <span className="text-sky-300 font-bold">{scale.toFixed(1)}x</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="2.5"
+                    step="0.1"
+                    value={scale}
+                    onChange={(e) => setScale(parseFloat(e.target.value))}
+                    className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
+                  />
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </div>
 
         {/* Footer */}
-        <div className="bg-slate-950/90 px-4 py-3 border-t border-slate-800 flex items-center justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-3 py-1.5 text-xs text-slate-400 hover:text-white rounded hover:bg-slate-800 transition"
-          >
-            Cancel
-          </button>
-          <button
-            id="btn-confirm-feature-placement"
-            type="button"
-            onClick={handleConfirmPlacement}
-            className="flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white font-medium text-xs px-4 py-1.5 rounded transition shadow-md"
-          >
-            <Check className="w-3.5 h-3.5" />
-            <span>Place on Canvas</span>
-          </button>
+        <div className="bg-slate-950/90 px-4 py-3 border-t border-slate-800 flex items-center justify-between">
+          <div className="text-[11px] font-mono text-slate-400">
+            {activeTab === 'plotted'
+              ? `${plottedFeatures.length} total symbol${plottedFeatures.length === 1 ? '' : 's'} plotted`
+              : activeTab === 'custom'
+              ? 'Anchors custom SVG/JPG symbol on live video'
+              : 'Select position on camera feed after confirming'}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {activeTab === 'plotted' ? (
+              <button
+                type="button"
+                onClick={onClose}
+                className="flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white font-medium text-xs px-4 py-1.5 rounded transition shadow-md"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Done</span>
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-3 py-1.5 text-xs text-slate-400 hover:text-white rounded hover:bg-slate-800 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  id="btn-confirm-feature-placement"
+                  type="button"
+                  onClick={handleConfirmPlacement}
+                  className="flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white font-medium text-xs px-4 py-1.5 rounded transition shadow-md"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Place on Canvas</span>
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </div>
     </div>

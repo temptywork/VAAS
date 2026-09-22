@@ -203,7 +203,9 @@ export const ScenarioModal: React.FC<ScenarioModalProps> = ({
                           </span>
                           <span className="flex items-center gap-1 text-red-400">
                             <MapPin className="w-3 h-3" />
-                            {scen.boundary.length} Boundary Pts
+                            {scen.boundaries && scen.boundaries.length > 0
+                              ? `${scen.boundaries.length} Boundaries`
+                              : `${scen.boundary?.length || 0} Boundary Pts`}
                           </span>
                         </div>
                       </div>

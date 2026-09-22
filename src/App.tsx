@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   ExerciseFeature,
+  ExerciseBoundary,
   BoundaryPoint,
   BoundaryConfig,
   CameraConfig,
@@ -48,7 +49,7 @@ export default function App() {
     autoPatrol: false,
   });
 
-  // Exercise Overlay Features & Boundary (Loaded with Exercise Crimson Shield initial setup)
+  // Exercise Overlay Features & Boundaries (Loaded with Exercise Crimson Shield initial setup)
   const [scenarioName, setScenarioName] = useState<string>(DEFAULT_SCENARIOS[0].scenario_name);
   const [features, setFeatures] = useState<ExerciseFeature[]>(() =>
     DEFAULT_SCENARIOS[0].features.map((f) => ({
@@ -57,7 +58,33 @@ export default function App() {
       createdAt: Date.now(),
     }))
   );
-  const [boundary, setBoundary] = useState<BoundaryPoint[]>(DEFAULT_SCENARIOS[0].boundary);
+
+  // Multi-boundary state management
+  const [boundaries, setBoundaries] = useState<ExerciseBoundary[]>(() => {
+    const sc = DEFAULT_SCENARIOS[0];
+    if (sc.boundaries && sc.boundaries.length > 0) {
+      return sc.boundaries.map((b) => ({ ...b, visible: b.visible !== false }));
+    }
+    return [
+      {
+        id: 'boundary-crimson-perimeter',
+        name: sc.boundary_config?.name || 'CRIMSON EXERCISE PERIMETER',
+        color: sc.boundary_config?.color || '#ef4444',
+        thickness: sc.boundary_config?.thickness || 3,
+        points: sc.boundary || [],
+        isClosed: sc.boundary_config?.closed ?? false,
+        fillOpacity: sc.boundary_config?.fillOpacity ?? 0.08,
+        visible: true,
+      },
+    ];
+  });
+  const [selectedBoundaryId, setSelectedBoundaryId] = useState<string | null>(() => {
+    const sc = DEFAULT_SCENARIOS[0];
+    return sc.boundaries && sc.boundaries[0] ? sc.boundaries[0].id : 'boundary-crimson-perimeter';
+  });
+  const [activeDrawingBoundaryId, setActiveDrawingBoundaryId] = useState<string | null>(null);
+
+  const [boundary, setBoundary] = useState<BoundaryPoint[]>(DEFAULT_SCENARIOS[0].boundary || []);
   const [boundaryConfig, setBoundaryConfig] = useState<BoundaryConfig>(() => {
     return (
       DEFAULT_SCENARIOS[0].boundary_config || {
@@ -318,10 +345,76 @@ export default function App() {
     setPendingFeatureOptions({});
   };
 
-  // Boundary Drawing Handlers (PRD Section 10)
-  const handleStartBoundary = () => {
+  // Boundary Management Handlers (Multi-boundary support)
+  const handleAddBoundary = () => {
+    const palette = ['#ef4444', '#f59e0b', '#38bdf8', '#22c55e', '#a855f7', '#eab308', '#ec4899'];
+    const newB: ExerciseBoundary = {
+      id: `boundary_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      name: `PHASE LINE ${String.fromCharCode(65 + (boundaries.length % 26))}`,
+      color: palette[boundaries.length % palette.length],
+      thickness: 3,
+      points: [],
+      isClosed: false,
+      fillOpacity: 0.08,
+      visible: true,
+    };
+    setBoundaries((prev) => [...prev, newB]);
+    setSelectedBoundaryId(newB.id);
+  };
+
+  const handleUpdateBoundary = (updated: ExerciseBoundary) => {
+    setBoundaries((prev) => prev.map((b) => (b.id === updated.id ? updated : b)));
+  };
+
+  const handleDeleteBoundary = (id: string) => {
+    setBoundaries((prev) => {
+      const filtered = prev.filter((b) => b.id !== id);
+      if (selectedBoundaryId === id) {
+        setSelectedBoundaryId(filtered[0]?.id || null);
+      }
+      return filtered;
+    });
+  };
+
+  const handleToggleBoundaryVisibility = (id: string) => {
+    setBoundaries((prev) =>
+      prev.map((b) => (b.id === id ? { ...b, visible: b.visible === false ? true : false } : b))
+    );
+  };
+
+  const handleClearBoundaryPoints = (id: string) => {
+    setBoundaries((prev) => prev.map((b) => (b.id === id ? { ...b, points: [] } : b)));
+    if (activeDrawingBoundaryId === id) {
+      setActiveBoundaryPoints([]);
+    }
+    setBoundary([]);
+  };
+
+  const handleStartDrawingBoundary = (boundaryId?: string) => {
+    const targetId = boundaryId || selectedBoundaryId || (boundaries[0]?.id ?? null);
+    if (!targetId) {
+      // Create new boundary first
+      const newB: ExerciseBoundary = {
+        id: `boundary_${Date.now()}`,
+        name: `BOUNDARY ${boundaries.length + 1}`,
+        color: '#38bdf8',
+        thickness: 3,
+        points: [],
+        isClosed: false,
+        fillOpacity: 0.08,
+        visible: true,
+      };
+      setBoundaries((prev) => [...prev, newB]);
+      setSelectedBoundaryId(newB.id);
+      setActiveDrawingBoundaryId(newB.id);
+      setActiveBoundaryPoints([]);
+    } else {
+      setActiveDrawingBoundaryId(targetId);
+      setSelectedBoundaryId(targetId);
+      const target = boundaries.find((b) => b.id === targetId);
+      setActiveBoundaryPoints(target?.points ? [...target.points] : []);
+    }
     setIsDrawingBoundary(true);
-    setActiveBoundaryPoints([]);
     setPendingFeatureType(null);
   };
 
@@ -330,10 +423,30 @@ export default function App() {
   };
 
   const handleFinishBoundary = () => {
-    if (activeBoundaryPoints.length >= 2) {
+    if (activeDrawingBoundaryId) {
+      setBoundaries((prev) =>
+        prev.map((b) =>
+          b.id === activeDrawingBoundaryId ? { ...b, points: activeBoundaryPoints } : b
+        )
+      );
+      setBoundary(activeBoundaryPoints);
+    } else if (activeBoundaryPoints.length >= 2) {
+      const newB: ExerciseBoundary = {
+        id: `boundary_${Date.now()}`,
+        name: `BOUNDARY ${boundaries.length + 1}`,
+        color: '#ef4444',
+        thickness: 3,
+        points: activeBoundaryPoints,
+        isClosed: false,
+        fillOpacity: 0.08,
+        visible: true,
+      };
+      setBoundaries((prev) => [...prev, newB]);
+      setSelectedBoundaryId(newB.id);
       setBoundary(activeBoundaryPoints);
     }
     setActiveBoundaryPoints([]);
+    setActiveDrawingBoundaryId(null);
     setIsDrawingBoundary(false);
   };
 
@@ -341,14 +454,21 @@ export default function App() {
     setActiveBoundaryPoints((prev) => prev.slice(0, -1));
   };
 
+  const handleCancelBoundary = () => {
+    setActiveBoundaryPoints([]);
+    setActiveDrawingBoundaryId(null);
+    setIsDrawingBoundary(false);
+  };
+
   const handleClearAll = () => {
-    if (confirm('Clear all placed exercise features and boundaries?')) {
-      setFeatures([]);
-      setBoundary([]);
-      setActiveBoundaryPoints([]);
-      setIsDrawingBoundary(false);
-      setSelectedFeatureId(null);
-    }
+    setFeatures([]);
+    setBoundaries([]);
+    setBoundary([]);
+    setActiveBoundaryPoints([]);
+    setActiveDrawingBoundaryId(null);
+    setIsDrawingBoundary(false);
+    setSelectedFeatureId(null);
+    setSelectedBoundaryId(null);
   };
 
   // Scenario Save & Load Handlers (PRD Section 23 & 26)
@@ -375,8 +495,23 @@ export default function App() {
         customImage: f.customImage,
         customImageType: f.customImageType,
       })),
-      boundary: boundary.map(([x, y]) => [Math.round(x), Math.round(y)]),
-      boundary_config: boundaryConfig,
+      boundaries: boundaries.map((b) => ({
+        ...b,
+        points: b.points.map(([x, y]) => [Math.round(x), Math.round(y)]),
+      })),
+      boundary: (boundaries[0]?.points || boundary || []).map(([x, y]) => [
+        Math.round(x),
+        Math.round(y),
+      ]),
+      boundary_config: boundaries[0]
+        ? {
+            name: boundaries[0].name,
+            color: boundaries[0].color,
+            thickness: boundaries[0].thickness,
+            closed: boundaries[0].isClosed,
+            fillOpacity: boundaries[0].fillOpacity,
+          }
+        : boundaryConfig,
       registration: {
         method: 'ORB_RANSAC_HOMOGRAPHY',
         match_threshold: regSettings.matchRatioThreshold,
@@ -425,11 +560,34 @@ export default function App() {
         createdAt: Date.now(),
       }))
     );
+
+    if (scenario.boundaries && scenario.boundaries.length > 0) {
+      setBoundaries(scenario.boundaries.map((b) => ({ ...b, visible: b.visible !== false })));
+      setSelectedBoundaryId(scenario.boundaries[0].id);
+    } else if (scenario.boundary && scenario.boundary.length > 0) {
+      const legacyB: ExerciseBoundary = {
+        id: `boundary_${Date.now()}`,
+        name: scenario.boundary_config?.name || 'SIMULATED / EXERCISE BOUNDARY',
+        color: scenario.boundary_config?.color || '#ef4444',
+        thickness: scenario.boundary_config?.thickness || 3,
+        points: scenario.boundary,
+        isClosed: scenario.boundary_config?.closed ?? false,
+        fillOpacity: scenario.boundary_config?.fillOpacity ?? 0.08,
+        visible: true,
+      };
+      setBoundaries([legacyB]);
+      setSelectedBoundaryId(legacyB.id);
+    } else {
+      setBoundaries([]);
+      setSelectedBoundaryId(null);
+    }
+
     setBoundary(scenario.boundary || []);
     if (scenario.boundary_config) {
       setBoundaryConfig(scenario.boundary_config);
     }
     setActiveBoundaryPoints([]);
+    setActiveDrawingBoundaryId(null);
     setIsDrawingBoundary(false);
 
     if (scenario.camera?.rtsp_url) {
@@ -475,11 +633,14 @@ export default function App() {
         }}
         onDisconnect={() => setIsConnected(false)}
         isDrawingBoundary={isDrawingBoundary}
-        onStartBoundary={handleStartBoundary}
+        activeBoundaryPointsCount={activeBoundaryPoints.length}
+        onStartBoundary={() => handleStartDrawingBoundary()}
         onFinishBoundary={handleFinishBoundary}
         onClearLastBoundaryPoint={handleClearLastBoundaryPoint}
+        onCancelBoundary={handleCancelBoundary}
         onClearAll={handleClearAll}
-        boundaryConfig={boundaryConfig}
+        boundaryConfig={boundaries.find((b) => b.id === selectedBoundaryId) || boundaries[0]}
+        boundariesCount={boundaries.length}
         onOpenBoundaryConfig={() => setIsBoundaryConfigOpen(true)}
         onOpenAddFeature={() => setIsAddFeatureOpen(true)}
         onOpenSaveScenario={() => setScenarioModalMode('save')}
@@ -505,12 +666,17 @@ export default function App() {
           sourceType={sourceType}
           simState={simState}
           features={features}
+          boundaries={boundaries}
           boundary={boundary}
-          boundaryConfig={boundaryConfig}
+          boundaryConfig={boundaries.find((b) => b.id === selectedBoundaryId) || boundaries[0]}
+          activeBoundaryConfig={
+            boundaries.find((b) => b.id === activeDrawingBoundaryId) || undefined
+          }
           activeBoundaryPoints={activeBoundaryPoints}
           isDrawingBoundary={isDrawingBoundary}
           pendingFeatureType={pendingFeatureType}
           pendingFeatureLabel={pendingFeatureLabel}
+          pendingFeatureCustomImage={pendingFeatureOptions.customImage}
           onAddFeaturePoint={handleAddFeaturePoint}
           onAddBoundaryPoint={handleAddBoundaryPoint}
           onSelectFeature={(feat) => setSelectedFeatureId(feat ? feat.id : null)}
@@ -552,7 +718,11 @@ export default function App() {
         isConnected={isConnected}
         registrationMetrics={registrationMetrics}
         featureCount={features.length}
-        boundaryPointCount={boundary.length}
+        boundariesCount={boundaries.length}
+        boundaryPointCount={
+          boundaries.reduce((sum, b) => sum + (b.visible !== false ? b.points.length : 0), 0) +
+          (isDrawingBoundary ? activeBoundaryPoints.length : 0)
+        }
         isDrawingBoundary={isDrawingBoundary}
         minInliersThreshold={regSettings.minInliers}
         onOpenSettings={() => setIsSettingsOpen(true)}
@@ -564,20 +734,30 @@ export default function App() {
         onClose={() => setIsAddFeatureOpen(false)}
         onSelectFeatureForPlacement={handleSelectFeatureForPlacement}
         existingCountByType={existingCountByType}
+        plottedFeatures={features}
+        onDeleteFeature={(id) => {
+          setFeatures((prev) => prev.filter((f) => f.id !== id));
+          if (selectedFeatureId === id) setSelectedFeatureId(null);
+        }}
+        onDeleteAllFeatures={() => {
+          setFeatures([]);
+          setSelectedFeatureId(null);
+        }}
       />
 
       <BoundaryConfigModal
         isOpen={isBoundaryConfigOpen}
         onClose={() => setIsBoundaryConfigOpen(false)}
-        config={boundaryConfig}
-        onChangeConfig={setBoundaryConfig}
-        pointCount={boundary.length}
+        boundaries={boundaries}
+        selectedBoundaryId={selectedBoundaryId}
+        onSelectBoundary={setSelectedBoundaryId}
+        onAddBoundary={handleAddBoundary}
+        onUpdateBoundary={handleUpdateBoundary}
+        onDeleteBoundary={handleDeleteBoundary}
+        onToggleBoundaryVisibility={handleToggleBoundaryVisibility}
+        onStartDrawingBoundary={handleStartDrawingBoundary}
+        onClearBoundaryPoints={handleClearBoundaryPoints}
         isDrawing={isDrawingBoundary}
-        onStartDrawing={handleStartBoundary}
-        onClearBoundary={() => {
-          setBoundary([]);
-          setActiveBoundaryPoints([]);
-        }}
       />
 
       <ScenarioModal

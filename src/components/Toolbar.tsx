@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Camera,
   Play,
@@ -18,6 +18,8 @@ import {
   Tv,
   Palette,
   ShieldAlert,
+  AlertTriangle,
+  X,
 } from 'lucide-react';
 import { RegistrationQuality, BoundaryConfig } from '../types';
 
@@ -30,11 +32,14 @@ interface ToolbarProps {
   onConnect: () => void;
   onDisconnect: () => void;
   isDrawingBoundary: boolean;
-  onStartBoundary: () => void;
+  activeBoundaryPointsCount?: number;
+  onStartBoundary?: () => void;
   onFinishBoundary: () => void;
   onClearLastBoundaryPoint: () => void;
+  onCancelBoundary?: () => void;
   onClearAll: () => void;
-  boundaryConfig: BoundaryConfig;
+  boundaryConfig?: BoundaryConfig;
+  boundariesCount?: number;
   onOpenBoundaryConfig: () => void;
   onOpenAddFeature: () => void;
   onOpenSaveScenario: () => void;
@@ -60,11 +65,14 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onConnect,
   onDisconnect,
   isDrawingBoundary,
+  activeBoundaryPointsCount = 0,
   onStartBoundary,
   onFinishBoundary,
   onClearLastBoundaryPoint,
+  onCancelBoundary,
   onClearAll,
   boundaryConfig,
+  boundariesCount,
   onOpenBoundaryConfig,
   onOpenAddFeature,
   onOpenSaveScenario,
@@ -80,6 +88,14 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   registrationQuality,
   hasReference,
 }) => {
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  useEffect(() => {
+    if (confirmClear) {
+      const timer = setTimeout(() => setConfirmClear(false), 3500);
+      return () => clearTimeout(timer);
+    }
+  }, [confirmClear]);
   return (
     <div
       id="tactical-system-toolbar"
@@ -178,65 +194,98 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           <span>Add Feature</span>
         </button>
 
-        {/* Boundary Tools */}
+        {/* Boundaries Tool (Entry point for boundary management & drawing) */}
         <div className="flex items-center gap-1">
-          {!isDrawingBoundary ? (
-            <button
-              id="btn-draw-boundary"
-              onClick={onStartBoundary}
-              className="flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 px-2.5 py-1.5 rounded font-medium transition"
-              title="Draw simulated exercise boundary line"
-            >
-              <PenTool className="w-3.5 h-3.5" />
-              <span>Draw Boundary</span>
-            </button>
-          ) : (
-            <div className="flex items-center gap-1 bg-amber-950/60 border border-amber-500/50 rounded px-1 py-0.5">
+          {isDrawingBoundary ? (
+            <div className="flex items-center gap-1 bg-amber-950/80 border border-amber-500/60 rounded px-1.5 py-0.5 shadow-sm">
+              <span className="font-mono text-[10px] text-amber-300 font-bold px-1 flex items-center gap-1">
+                <PenTool className="w-3 h-3 text-amber-400 animate-pulse" />
+                <span>DRAWING</span>
+                {activeBoundaryPointsCount > 0 && (
+                  <span className="text-amber-200">({activeBoundaryPointsCount} pts)</span>
+                )}
+              </span>
               <button
                 id="btn-finish-boundary"
                 onClick={onFinishBoundary}
-                className="flex items-center gap-1 bg-amber-600 hover:bg-amber-500 text-slate-950 font-bold px-2 py-1 rounded transition"
+                className="flex items-center gap-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-2 py-0.5 rounded text-[11px] transition shadow"
+                title="Finish and anchor boundary"
               >
-                <Check className="w-3.5 h-3.5" />
-                <span>Finish Boundary</span>
+                <Check className="w-3 h-3" />
+                <span>Finish</span>
               </button>
               <button
                 id="btn-clear-last-point"
                 onClick={onClearLastBoundaryPoint}
-                className="flex items-center gap-1 text-slate-300 hover:text-white px-2 py-1 rounded hover:bg-slate-800"
+                className="flex items-center gap-1 text-slate-300 hover:text-white px-1.5 py-0.5 rounded hover:bg-slate-800 text-[11px]"
                 title="Remove most recent boundary point"
               >
                 <RotateCcw className="w-3 h-3" />
-                <span>Undo Pt</span>
+                <span>Undo</span>
               </button>
+              {onCancelBoundary && (
+                <button
+                  id="btn-cancel-boundary"
+                  onClick={onCancelBoundary}
+                  className="flex items-center gap-0.5 text-slate-400 hover:text-rose-300 hover:bg-rose-950/50 px-1 py-0.5 rounded text-[11px]"
+                  title="Cancel drawing boundary"
+                >
+                  <X className="w-3 h-3" />
+                  <span>Cancel</span>
+                </button>
+              )}
             </div>
-          )}
+          ) : null}
 
-          {/* Boundary Customization Button (Color, Name, Thickness) */}
+          {/* Boundaries Button: Opens Boundaries Tab & Drawer with Drawing Controls */}
           <button
             id="btn-boundary-config"
             onClick={onOpenBoundaryConfig}
-            className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-2 py-1.5 rounded font-medium transition"
-            title="Customize boundary colour, name label, and line thickness"
+            className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-2.5 py-1.5 rounded font-medium transition"
+            title="Manage boundaries, customize colors, and draw exercise boundaries"
           >
-            <span
-              className="w-2.5 h-2.5 rounded-full inline-block shadow-sm ring-1 ring-white/20"
-              style={{ backgroundColor: boundaryConfig.color }}
-            />
-            <span className="font-mono text-[11px]">Boundary Style</span>
+            {boundaryConfig?.color ? (
+              <span
+                className="w-2.5 h-2.5 rounded-full inline-block shadow-sm ring-1 ring-white/20"
+                style={{ backgroundColor: boundaryConfig.color }}
+              />
+            ) : (
+              <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+            )}
+            <span className="font-mono text-[11px]">Boundaries</span>
+            {boundariesCount !== undefined && boundariesCount > 0 && (
+              <span className="bg-slate-700 text-sky-300 font-mono text-[10px] px-1.5 py-0.2 rounded font-bold">
+                {boundariesCount}
+              </span>
+            )}
           </button>
         </div>
 
-        {/* Clear All */}
-        <button
-          id="btn-clear-all"
-          onClick={onClearAll}
-          className="flex items-center gap-1 text-slate-400 hover:text-red-400 hover:bg-slate-800 px-2 py-1.5 rounded transition"
-          title="Clear all placed features and boundaries"
-        >
-          <Trash className="w-3.5 h-3.5" />
-          <span>Clear</span>
-        </button>
+        {/* Clear All - Safe two-step tactile confirmation (works 100% in sandboxed iframes) */}
+        {!confirmClear ? (
+          <button
+            id="btn-clear-all"
+            onClick={() => setConfirmClear(true)}
+            className="flex items-center gap-1 text-slate-400 hover:text-rose-400 hover:bg-slate-800 px-2 py-1.5 rounded transition"
+            title="Clear all placed features and boundaries"
+          >
+            <Trash className="w-3.5 h-3.5" />
+            <span>Clear All</span>
+          </button>
+        ) : (
+          <button
+            id="btn-clear-all-confirm"
+            onClick={() => {
+              onClearAll();
+              setConfirmClear(false);
+            }}
+            className="flex items-center gap-1 bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold px-2.5 py-1.5 rounded transition shadow text-[11px] animate-pulse"
+            title="Click again to confirm clearing all features and boundaries"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />
+            <span>Confirm Clear?</span>
+          </button>
+        )}
 
         <div className="h-4 w-[1px] bg-slate-800 mx-1" />
 

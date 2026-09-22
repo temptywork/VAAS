@@ -50,9 +50,10 @@ export interface ExerciseBoundary {
   name: string;
   points: BoundaryPoint[];
   color: string;
-  thickness?: number;
+  thickness: number;
   visible: boolean;
   isClosed: boolean;
+  fillOpacity?: number;
 }
 
 export type RegistrationQuality = 'GOOD' | 'DEGRADED' | 'LOST' | 'UNINITIALIZED';
@@ -126,8 +127,9 @@ export interface ScenarioData {
     customImage?: string;
     customImageType?: 'svg' | 'jpg' | 'png' | 'other';
   }>;
-  boundary: BoundaryPoint[];
+  boundary?: BoundaryPoint[];
   boundary_config?: BoundaryConfig;
+  boundaries?: ExerciseBoundary[];
   registration: {
     method: string;
     match_threshold: number;

@@ -57,6 +57,39 @@ export const DEFAULT_SCENARIOS: ScenarioData[] = [
         scale: 1,
       },
     ],
+    boundaries: [
+      {
+        id: 'bnd_1',
+        name: 'SIMULATED / EXERCISE BOUNDARY',
+        points: [
+          [240, 480],
+          [420, 520],
+          [710, 500],
+          [980, 460],
+          [1120, 420],
+        ],
+        color: '#ef4444',
+        thickness: 3,
+        visible: true,
+        isClosed: false,
+        fillOpacity: 0.08,
+      },
+      {
+        id: 'bnd_2',
+        name: 'PHASE LINE ALPHA',
+        points: [
+          [280, 310],
+          [540, 330],
+          [820, 290],
+          [1060, 240],
+        ],
+        color: '#f59e0b',
+        thickness: 2,
+        visible: true,
+        isClosed: false,
+        fillOpacity: 0.05,
+      },
+    ],
     boundary: [
       [240, 480],
       [420, 520],
@@ -115,6 +148,23 @@ export const DEFAULT_SCENARIOS: ScenarioData[] = [
         label: 'SIM PATROL 04',
         rotation: 0,
         scale: 0.9,
+      },
+    ],
+    boundaries: [
+      {
+        id: 'bnd_ds_1',
+        name: 'RANGE DEFENSE PERIMETER',
+        points: [
+          [180, 590],
+          [480, 560],
+          [780, 580],
+          [1080, 520],
+        ],
+        color: '#f59e0b',
+        thickness: 3,
+        visible: true,
+        isClosed: false,
+        fillOpacity: 0.08,
       },
     ],
     boundary: [

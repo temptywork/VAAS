@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import {
   ExerciseFeature,
+  ExerciseBoundary,
   BoundaryPoint,
   BoundaryConfig,
   RegistrationMetrics,
@@ -24,8 +25,10 @@ interface TacticalCanvasProps {
   sourceType: 'simulator' | 'webcam' | 'rtsp';
   simState: SimulatorCameraState;
   features: ExerciseFeature[];
-  boundary: BoundaryPoint[];
+  boundaries?: ExerciseBoundary[];
+  boundary?: BoundaryPoint[];
   boundaryConfig?: BoundaryConfig;
+  activeBoundaryConfig?: BoundaryConfig;
   activeBoundaryPoints: BoundaryPoint[];
   isDrawingBoundary: boolean;
   pendingFeatureType: string | null;
@@ -47,8 +50,10 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
   sourceType,
   simState,
   features,
-  boundary,
+  boundaries = [],
+  boundary = [],
   boundaryConfig,
+  activeBoundaryConfig,
   activeBoundaryPoints,
   isDrawingBoundary,
   pendingFeatureType,
@@ -203,42 +208,45 @@ function hexToRgba(hex: string, alpha: number) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-      // 4. Draw Exercise Boundary (Polyline or Closed Area with custom name & color)
+      // 4. Draw Exercise Boundaries (Supports multiple layers, custom colors, thickness, closed areas, and labels)
       if (overlaySettings.showBoundary) {
-        const pointsToDraw = isDrawingBoundary ? activeBoundaryPoints : boundary;
-        if (pointsToDraw.length > 0) {
-          const bColor = boundaryConfig?.color || '#ef4444';
-          const bThickness = boundaryConfig?.thickness || overlaySettings.boundaryThickness || 3;
-          const bName = boundaryConfig?.name !== undefined ? boundaryConfig.name : 'SIMULATED / EXERCISE BOUNDARY';
-          const isClosed = (boundaryConfig?.closed ?? false) && pointsToDraw.length >= 3 && !isDrawingBoundary;
-          const fillOpacity = boundaryConfig?.fillOpacity || 0;
+        const renderBoundaryLayer = (
+          pts: BoundaryPoint[],
+          color: string,
+          thickness: number,
+          name: string,
+          isClosed: boolean,
+          fillOpacity: number,
+          isBeingDrawn: boolean = false
+        ) => {
+          if (pts.length === 0) return;
 
           ctx.save();
-          ctx.strokeStyle = bColor;
-          ctx.lineWidth = bThickness;
-          ctx.setLineDash([12, 6]);
+          ctx.strokeStyle = color;
+          ctx.lineWidth = thickness;
+          ctx.setLineDash([10, 5]);
 
           ctx.beginPath();
-          const p0 = transformCoord(pointsToDraw[0][0], pointsToDraw[0][1]);
+          const p0 = transformCoord(pts[0][0], pts[0][1]);
           ctx.moveTo(p0[0], p0[1]);
 
-          for (let i = 1; i < pointsToDraw.length; i++) {
-            const pt = transformCoord(pointsToDraw[i][0], pointsToDraw[i][1]);
+          for (let i = 1; i < pts.length; i++) {
+            const pt = transformCoord(pts[i][0], pts[i][1]);
             ctx.lineTo(pt[0], pt[1]);
           }
 
-          if (isClosed) {
+          if (isClosed && !isBeingDrawn) {
             ctx.closePath();
           }
 
-          // If currently drawing and mouse is on canvas, draw dashed line to cursor
-          if (isDrawingBoundary && mousePos) {
+          // If currently being drawn and mouse is on canvas, connect to cursor
+          if (isBeingDrawn && mousePos) {
             ctx.lineTo(mousePos.x, mousePos.y);
           }
 
           // Optional semi-transparent area fill if closed
-          if (isClosed && fillOpacity > 0) {
-            ctx.fillStyle = hexToRgba(bColor, fillOpacity);
+          if (isClosed && !isBeingDrawn && fillOpacity > 0 && pts.length >= 3) {
+            ctx.fillStyle = hexToRgba(color, fillOpacity);
             ctx.fill();
           }
 
@@ -246,29 +254,29 @@ function hexToRgba(hex: string, alpha: number) {
 
           // Draw vertex points handles
           ctx.setLineDash([]);
-          ctx.fillStyle = bColor;
+          ctx.fillStyle = color;
           ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 2;
-          for (let i = 0; i < pointsToDraw.length; i++) {
-            const pt = transformCoord(pointsToDraw[i][0], pointsToDraw[i][1]);
+          ctx.lineWidth = 1.5;
+          for (let i = 0; i < pts.length; i++) {
+            const pt = transformCoord(pts[i][0], pts[i][1]);
             ctx.beginPath();
-            ctx.arc(pt[0], pt[1], Math.max(3.5, bThickness * 1.1), 0, Math.PI * 2);
+            ctx.arc(pt[0], pt[1], Math.max(3.5, thickness * 1.0), 0, Math.PI * 2);
             ctx.fill();
             ctx.stroke();
           }
 
           // Boundary Tactical Label Badge
-          if (pointsToDraw.length >= 2 && bName.trim()) {
-            const midIdx = Math.floor(pointsToDraw.length / 2);
-            const pA = transformCoord(pointsToDraw[midIdx - 1][0], pointsToDraw[midIdx - 1][1]);
-            const pB = transformCoord(pointsToDraw[midIdx][0], pointsToDraw[midIdx][1]);
+          if (pts.length >= 2 && name && name.trim()) {
+            const midIdx = Math.floor(pts.length / 2);
+            const pA = transformCoord(pts[midIdx - 1][0], pts[midIdx - 1][1]);
+            const pB = transformCoord(pts[midIdx][0], pts[midIdx][1]);
             const labelX = (pA[0] + pB[0]) / 2;
             const labelY = (pA[1] + pB[1]) / 2 - 14;
 
             ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-            ctx.strokeStyle = bColor;
+            ctx.strokeStyle = color;
             ctx.lineWidth = 1.2;
-            const labelText = bName.trim();
+            const labelText = isBeingDrawn ? `[PLOTTING] ${name.trim()}` : name.trim();
             ctx.font = 'bold 11px monospace';
             const textWidth = ctx.measureText(labelText).width;
 
@@ -277,12 +285,52 @@ function hexToRgba(hex: string, alpha: number) {
             ctx.fill();
             ctx.stroke();
 
-            ctx.fillStyle = bColor;
+            ctx.fillStyle = color;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillText(labelText, labelX, labelY);
           }
           ctx.restore();
+        };
+
+        // Draw all persistent exercise boundaries in scenario
+        if (boundaries && boundaries.length > 0) {
+          boundaries.forEach((b) => {
+            if (b.visible === false || b.points.length === 0) return;
+            renderBoundaryLayer(
+              b.points,
+              b.color || '#ef4444',
+              b.thickness || 3,
+              b.name || 'BOUNDARY',
+              Boolean(b.isClosed),
+              b.fillOpacity || 0,
+              false
+            );
+          });
+        } else if (boundary && boundary.length > 0 && !isDrawingBoundary) {
+          // Fallback to legacy single boundary
+          renderBoundaryLayer(
+            boundary,
+            boundaryConfig?.color || '#ef4444',
+            boundaryConfig?.thickness || overlaySettings.boundaryThickness || 3,
+            boundaryConfig?.name || 'EXERCISE BOUNDARY',
+            Boolean(boundaryConfig?.closed),
+            boundaryConfig?.fillOpacity || 0,
+            false
+          );
+        }
+
+        // Draw active in-progress boundary points if operator is drawing
+        if (isDrawingBoundary && activeBoundaryPoints.length > 0) {
+          renderBoundaryLayer(
+            activeBoundaryPoints,
+            activeBoundaryConfig?.color || '#38bdf8',
+            activeBoundaryConfig?.thickness || 3,
+            activeBoundaryConfig?.name || 'NEW BOUNDARY',
+            false,
+            0,
+            true
+          );
         }
       }
 
