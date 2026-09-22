@@ -14,18 +14,33 @@ import {
   Activity,
   Sliders,
   Eye,
+  EyeOff,
+  Layers,
   Settings,
   Tv,
   Palette,
   ShieldAlert,
   AlertTriangle,
   X,
+  RotateCw,
+  Zap,
+  Smartphone,
+  Maximize,
+  Minimize,
 } from 'lucide-react';
-import { RegistrationQuality, BoundaryConfig } from '../types';
+import { RegistrationQuality, BoundaryConfig, VideoSourceType } from '../types';
 
 interface ToolbarProps {
-  sourceType: 'simulator' | 'webcam' | 'rtsp';
-  onChangeSourceType: (type: 'simulator' | 'webcam' | 'rtsp') => void;
+  sourceType: VideoSourceType;
+  onChangeSourceType: (type: VideoSourceType) => void;
+  cameraFacingMode?: 'environment' | 'user';
+  onToggleCameraFacing?: () => void;
+  availableCameras?: MediaDeviceInfo[];
+  selectedCameraDeviceId?: string | null;
+  onSelectCameraDevice?: (id: string) => void;
+  isTorchOn?: boolean;
+  hasTorchSupport?: boolean;
+  onToggleTorch?: () => void;
   rtspUrl: string;
   onChangeRtspUrl: (url: string) => void;
   isConnected: boolean;
@@ -40,6 +55,8 @@ interface ToolbarProps {
   onClearAll: () => void;
   boundaryConfig?: BoundaryConfig;
   boundariesCount?: number;
+  allLayersVisible?: boolean;
+  onToggleAllLayers?: () => void;
   onOpenBoundaryConfig: () => void;
   onOpenAddFeature: () => void;
   onOpenSaveScenario: () => void;
@@ -51,6 +68,8 @@ interface ToolbarProps {
   onToggleDiagnostics: () => void;
   showSimControls: boolean;
   onToggleSimControls: () => void;
+  isFullscreen?: boolean;
+  onToggleFullscreen?: () => void;
   onOpenSettings: () => void;
   registrationQuality: RegistrationQuality;
   hasReference: boolean;
@@ -59,6 +78,14 @@ interface ToolbarProps {
 export const Toolbar: React.FC<ToolbarProps> = ({
   sourceType,
   onChangeSourceType,
+  cameraFacingMode = 'environment',
+  onToggleCameraFacing,
+  availableCameras = [],
+  selectedCameraDeviceId,
+  onSelectCameraDevice,
+  isTorchOn = false,
+  hasTorchSupport = false,
+  onToggleTorch,
   rtspUrl,
   onChangeRtspUrl,
   isConnected,
@@ -73,6 +100,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onClearAll,
   boundaryConfig,
   boundariesCount,
+  allLayersVisible = true,
+  onToggleAllLayers,
   onOpenBoundaryConfig,
   onOpenAddFeature,
   onOpenSaveScenario,
@@ -84,6 +113,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onToggleDiagnostics,
   showSimControls,
   onToggleSimControls,
+  isFullscreen = false,
+  onToggleFullscreen,
   onOpenSettings,
   registrationQuality,
   hasReference,
@@ -122,26 +153,99 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         </div>
 
         {/* Source Mode Selector */}
-        <div className="flex items-center bg-slate-950 border border-slate-700/80 rounded px-1.5 py-0.5">
-          <Camera className="w-3.5 h-3.5 text-slate-400 mr-1.5" />
-          <select
-            id="camera-source-select"
-            value={sourceType}
-            onChange={(e) =>
-              onChangeSourceType(e.target.value as 'simulator' | 'webcam' | 'rtsp')
-            }
-            className="bg-transparent text-slate-200 text-xs font-mono focus:outline-none cursor-pointer py-1"
-          >
-            <option value="simulator" className="bg-slate-900 text-slate-200">
-              Exercise Feed Simulator (Tactical Range)
-            </option>
-            <option value="webcam" className="bg-slate-900 text-slate-200">
-              Live Webcam / Video Capture
-            </option>
-            <option value="rtsp" className="bg-slate-900 text-slate-200">
-              RTSP IP Camera Stream
-            </option>
-          </select>
+        <div className="flex items-center gap-1 flex-wrap">
+          <div className="flex items-center bg-slate-950 border border-slate-700/80 rounded px-1.5 py-0.5">
+            {sourceType === 'rear_camera' ? (
+              <Smartphone className="w-3.5 h-3.5 text-emerald-400 mr-1.5 shrink-0" />
+            ) : (
+              <Camera className="w-3.5 h-3.5 text-slate-400 mr-1.5 shrink-0" />
+            )}
+            <select
+              id="camera-source-select"
+              value={sourceType}
+              onChange={(e) =>
+                onChangeSourceType(e.target.value as VideoSourceType)
+              }
+              className="bg-transparent text-slate-200 text-xs font-mono focus:outline-none cursor-pointer py-1"
+            >
+              <option value="simulator" className="bg-slate-900 text-slate-200">
+                Exercise Feed Simulator (Tactical Range)
+              </option>
+              <option value="rear_camera" className="bg-slate-900 text-emerald-400 font-bold">
+                Mobile Rear Camera (Back / Environment)
+              </option>
+              <option value="webcam" className="bg-slate-900 text-slate-200">
+                Live Webcam / Front Camera (User)
+              </option>
+              <option value="rtsp" className="bg-slate-900 text-slate-200">
+                RTSP IP Camera Stream
+              </option>
+            </select>
+          </div>
+
+          {/* Quick Flip Camera (Rear <-> Front) */}
+          {(sourceType === 'rear_camera' || sourceType === 'webcam') && onToggleCameraFacing && (
+            <button
+              id="btn-toggle-camera-facing"
+              type="button"
+              onClick={onToggleCameraFacing}
+              className="flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 px-2 py-1.5 rounded text-xs font-mono transition"
+              title={
+                sourceType === 'rear_camera'
+                  ? 'Switch to Front / User Camera'
+                  : 'Switch to Mobile Rear Camera (Environment)'
+              }
+            >
+              <RotateCw className="w-3 h-3 text-sky-400" />
+              <span>{sourceType === 'rear_camera' ? 'Flip to Front' : 'Flip to Rear'}</span>
+            </button>
+          )}
+
+          {/* Sensor / Lens Device Picker (if multiple cameras detected, e.g. Wide, Ultrawide, Tele) */}
+          {(sourceType === 'rear_camera' || sourceType === 'webcam') &&
+            availableCameras.length > 1 &&
+            onSelectCameraDevice && (
+              <div className="flex items-center bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5">
+                <select
+                  id="camera-device-select"
+                  value={selectedCameraDeviceId || ''}
+                  onChange={(e) => onSelectCameraDevice(e.target.value)}
+                  className="bg-transparent text-slate-300 text-[11px] font-mono focus:outline-none cursor-pointer py-0.5 max-w-[130px] truncate"
+                  title="Select specific hardware lens / camera sensor"
+                >
+                  <option value="" className="bg-slate-900 text-slate-300">
+                    Auto Camera Lens
+                  </option>
+                  {availableCameras.map((cam, idx) => (
+                    <option
+                      key={cam.deviceId || idx}
+                      value={cam.deviceId}
+                      className="bg-slate-900 text-slate-200"
+                    >
+                      {cam.label || `Camera Sensor ${idx + 1}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+          {/* Mobile Rear Camera Torch / Flashlight Toggle (if supported) */}
+          {hasTorchSupport && onToggleTorch && (
+            <button
+              id="btn-toggle-torch"
+              type="button"
+              onClick={onToggleTorch}
+              className={`flex items-center gap-1 px-2 py-1.5 rounded text-xs font-mono border transition ${
+                isTorchOn
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/60 shadow-sm'
+                  : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
+              }`}
+              title={isTorchOn ? 'Turn mobile torch / flashlight off' : 'Turn mobile torch / flashlight on'}
+            >
+              <Zap className={`w-3 h-3 ${isTorchOn ? 'fill-amber-400 text-amber-400' : ''}`} />
+              <span>{isTorchOn ? 'Torch On' : 'Torch'}</span>
+            </button>
+          )}
         </div>
 
         {/* RTSP URL Input Field (PRD Section 7.2) */}
@@ -259,6 +363,38 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               </span>
             )}
           </button>
+
+          {/* Master Layer Visibility: Hide/Unhide All Tactical Layers at Once */}
+          {onToggleAllLayers && (
+            <button
+              id="btn-toggle-all-layers"
+              onClick={onToggleAllLayers}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded font-medium transition border font-mono text-[11px] ${
+                allLayersVisible
+                  ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                  : 'bg-amber-950/80 hover:bg-amber-900/90 text-amber-300 border-amber-500/50 shadow-sm'
+              }`}
+              title={
+                allLayersVisible
+                  ? 'Hide all tactical overlay layers at once (features, boundaries, reticle)'
+                  : 'Unhide all tactical overlay layers'
+              }
+            >
+              {allLayersVisible ? (
+                <>
+                  <Eye className="w-3.5 h-3.5 text-sky-400" />
+                  <span className="hidden sm:inline">Layers:</span>
+                  <span className="text-emerald-400 font-bold">ON</span>
+                </>
+              ) : (
+                <>
+                  <EyeOff className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="hidden sm:inline">Layers:</span>
+                  <span className="text-amber-400 font-bold">HIDDEN</span>
+                </>
+              )}
+            </button>
+          )}
         </div>
 
         {/* Clear All - Safe two-step tactile confirmation (works 100% in sandboxed iframes) */}
@@ -379,6 +515,32 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         >
           <Settings className="w-4 h-4" />
         </button>
+
+        {/* Maximize / Fullscreen Screen Preview Toggle */}
+        {onToggleFullscreen && (
+          <button
+            id="btn-toolbar-toggle-fullscreen"
+            onClick={onToggleFullscreen}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded transition border font-mono text-[11px] font-semibold ${
+              isFullscreen
+                ? 'bg-sky-950 border-sky-500 text-sky-300'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700 hover:text-white shadow-sm'
+            }`}
+            title={isFullscreen ? 'Exit full screen (Esc)' : 'Maximize screen / Fullscreen preview'}
+          >
+            {isFullscreen ? (
+              <>
+                <Minimize className="w-3.5 h-3.5 text-sky-400" />
+                <span className="hidden sm:inline">Exit Full</span>
+              </>
+            ) : (
+              <>
+                <Maximize className="w-3.5 h-3.5 text-sky-400" />
+                <span className="hidden sm:inline">Maximize</span>
+              </>
+            )}
+          </button>
+        )}
       </div>
     </div>
   );

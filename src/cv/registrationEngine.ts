@@ -29,10 +29,13 @@ export class VisualRegistrationEngine {
 
   public settings: RegistrationSettings = {
     enabled: true,
-    maxFeatures: 220,
+    maxFeatures: 260,
     matchRatioThreshold: 0.74,
     ransacThresholdPx: 4.5,
     minInliers: 8,
+    ransacIterations: 160,
+    smoothingFactor: 0.65,
+    leastSquaresRefine: true,
     adaptiveReference: false,
     updateIntervalMs: 33, // ~30 FPS
   };
@@ -173,10 +176,11 @@ export class VisualRegistrationEngine {
       60
     );
 
-    // RANSAC Homography Estimation
+    // RANSAC Homography Estimation with configurable iteration trials
+    const iterations = this.settings.ransacIterations || 160;
     const ransac = estimateHomographyRANSAC(
       this.currentMatches,
-      120,
+      iterations,
       this.settings.ransacThresholdPx,
       this.settings.minInliers
     );
@@ -197,8 +201,9 @@ export class VisualRegistrationEngine {
       if (ransac.homography) {
         this.lastValidHomography = ransac.homography;
 
-        // Smooth homography with slight alpha to dampen jitter while retaining quick camera response
-        const alpha = quality === 'GOOD' ? 0.65 : 0.4;
+        // Smooth homography with configurable alpha to eliminate high-frequency jitter
+        const baseAlpha = this.settings.smoothingFactor ?? 0.65;
+        const alpha = quality === 'GOOD' ? baseAlpha : Math.min(baseAlpha, 0.4);
         if (!this.smoothedHomography) {
           this.smoothedHomography = [...ransac.homography];
         } else {

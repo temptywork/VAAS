@@ -238,22 +238,32 @@ export function estimateHomographyRANSAC(
   }
 
   if (bestH && bestInliers.length >= 4) {
+    // Refine homography using all inliers via normalized linear least squares / SVD approximation
+    // This dramatically stabilizes tracking and eliminates single-sample jitter.
+    let refinedH = bestH;
+    if (bestInliers.length >= 6) {
+      const refined = refineHomographyLeastSquares(bestInliers, bestH);
+      if (refined) {
+        refinedH = refined;
+      }
+    }
+
     // Compute average reprojection error
     let totalError = 0;
     for (let i = 0; i < bestInliers.length; i++) {
       const m = bestInliers[i];
-      const [px, py] = projectPoint(bestH, m.refX, m.refY);
+      const [px, py] = projectPoint(refinedH, m.refX, m.refY);
       totalError += Math.hypot(px - m.curX, py - m.curY);
     }
     const avgErr = totalError / bestInliers.length;
 
     // Extract motion metrics
-    const rotRad = Math.atan2(bestH[3], bestH[0]);
+    const rotRad = Math.atan2(refinedH[3], refinedH[0]);
     const rotDeg = (rotRad * 180) / Math.PI;
-    const scaleEst = Math.sqrt(bestH[0] * bestH[0] + bestH[3] * bestH[3]);
-    const transEst: [number, number] = [bestH[2], bestH[5]];
+    const scaleEst = Math.sqrt(refinedH[0] * refinedH[0] + refinedH[3] * refinedH[3]);
+    const transEst: [number, number] = [refinedH[2], refinedH[5]];
 
-    result.homography = bestH;
+    result.homography = refinedH;
     result.inliers = bestInliers;
     result.inlierCount = bestInliers.length;
     result.avgReprojectionError = avgErr;
@@ -263,6 +273,93 @@ export function estimateHomographyRANSAC(
   }
 
   return result;
+}
+
+/**
+ * Refine Homography using all inliers with normalized overdetermined linear system (A^T * A * h = A^T * b)
+ */
+export function refineHomographyLeastSquares(
+  inliers: FeatureMatch[],
+  initialH: Homography
+): Homography | null {
+  const n = inliers.length;
+  if (n < 4) return initialH;
+
+  // Build normal equations for 8 parameters (with h[8]=1):
+  // For each point:
+  // [x, y, 1, 0, 0, 0, -u*x, -u*y] * [h0..h7]^T = u
+  // [0, 0, 0, x, y, 1, -v*x, -v*y] * [h0..h7]^T = v
+  const AtA: number[][] = Array.from({ length: 8 }, () => new Array(8).fill(0));
+  const AtB: number[] = new Array(8).fill(0);
+
+  for (let i = 0; i < n; i++) {
+    const { refX: x, refY: y, curX: u, curY: v } = inliers[i];
+
+    const row1 = [x, y, 1, 0, 0, 0, -u * x, -u * y];
+    const b1 = u;
+
+    const row2 = [0, 0, 0, x, y, 1, -v * x, -v * y];
+    const b2 = v;
+
+    // Accumulate into AtA and AtB
+    for (let r = 0; r < 8; r++) {
+      AtB[r] += row1[r] * b1 + row2[r] * b2;
+      for (let c = 0; c < 8; c++) {
+        AtA[r][c] += row1[r] * row1[c] + row2[r] * row2[c];
+      }
+    }
+  }
+
+  // Gaussian elimination with partial pivoting on 8x8 system
+  for (let col = 0; col < 8; col++) {
+    let maxRow = col;
+    let maxVal = Math.abs(AtA[col][col]);
+    for (let row = col + 1; row < 8; row++) {
+      if (Math.abs(AtA[row][col]) > maxVal) {
+        maxVal = Math.abs(AtA[row][col]);
+        maxRow = row;
+      }
+    }
+
+    if (maxVal < 1e-11) {
+      return initialH; // Ill-conditioned, keep RANSAC best
+    }
+
+    if (maxRow !== col) {
+      const tempA = AtA[col];
+      AtA[col] = AtA[maxRow];
+      AtA[maxRow] = tempA;
+
+      const tempB = AtB[col];
+      AtB[col] = AtB[maxRow];
+      AtB[maxRow] = tempB;
+    }
+
+    for (let row = col + 1; row < 8; row++) {
+      const factor = AtA[row][col] / AtA[col][col];
+      for (let k = col; k < 8; k++) {
+        AtA[row][k] -= factor * AtA[col][k];
+      }
+      AtB[row] -= factor * AtB[col];
+    }
+  }
+
+  const h: number[] = new Array(8).fill(0);
+  for (let row = 7; row >= 0; row--) {
+    let sum = AtB[row];
+    for (let col = row + 1; col < 8; col++) {
+      sum -= AtA[row][col] * h[col];
+    }
+    h[row] = sum / AtA[row][row];
+  }
+
+  const refinedH = [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1.0];
+  const det = refinedH[0] * refinedH[4] - refinedH[1] * refinedH[3];
+  if (det <= 0 || !isFinite(det)) {
+    return initialH;
+  }
+
+  return refinedH;
 }
 
 /**

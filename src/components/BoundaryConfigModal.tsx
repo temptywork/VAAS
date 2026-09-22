@@ -24,6 +24,7 @@ interface BoundaryConfigModalProps {
   onUpdateBoundary: (boundary: ExerciseBoundary) => void;
   onDeleteBoundary: (id: string) => void;
   onToggleBoundaryVisibility: (id: string) => void;
+  onToggleAllBoundaries?: (visible: boolean) => void;
   onStartDrawingBoundary: (id: string) => void;
   onClearBoundaryPoints: (id: string) => void;
   isDrawing: boolean;
@@ -51,11 +52,14 @@ export const BoundaryConfigModal: React.FC<BoundaryConfigModalProps> = ({
   onUpdateBoundary,
   onDeleteBoundary,
   onToggleBoundaryVisibility,
+  onToggleAllBoundaries,
   onStartDrawingBoundary,
   onClearBoundaryPoints,
   isDrawing,
 }) => {
   if (!isOpen) return null;
+
+  const allBoundariesVisible = boundaries.length > 0 && boundaries.every((b) => b.visible !== false);
 
   const currentBoundary =
     boundaries.find((b) => b.id === selectedBoundaryId) || boundaries[0] || null;
@@ -107,18 +111,41 @@ export const BoundaryConfigModal: React.FC<BoundaryConfigModalProps> = ({
           <div className="md:col-span-2 space-y-2 border-r border-slate-800/80 pr-2">
             <div className="flex items-center justify-between pb-1">
               <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">
-                Boundary Layers
+                Boundary Layers ({boundaries.length})
               </span>
-              <button
-                type="button"
-                id="btn-add-new-boundary"
-                onClick={onAddBoundary}
-                className="flex items-center gap-1 text-[11px] font-mono text-sky-400 hover:text-sky-300"
-                title="Create a new boundary layer"
-              >
-                <Plus className="w-3 h-3" />
-                <span>Add Layer</span>
-              </button>
+              <div className="flex items-center gap-2">
+                {boundaries.length > 0 && onToggleAllBoundaries && (
+                  <button
+                    type="button"
+                    id="btn-toggle-all-boundaries"
+                    onClick={() => onToggleAllBoundaries(!allBoundariesVisible)}
+                    className="flex items-center gap-1 text-[11px] font-mono text-slate-400 hover:text-slate-200 transition"
+                    title={allBoundariesVisible ? 'Hide all boundary layers' : 'Unhide all boundary layers'}
+                  >
+                    {allBoundariesVisible ? (
+                      <>
+                        <EyeOff className="w-3 h-3 text-amber-400" />
+                        <span>Hide All</span>
+                      </>
+                    ) : (
+                      <>
+                        <Eye className="w-3 h-3 text-emerald-400" />
+                        <span>Unhide All</span>
+                      </>
+                    )}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  id="btn-add-new-boundary"
+                  onClick={onAddBoundary}
+                  className="flex items-center gap-1 text-[11px] font-mono text-sky-400 hover:text-sky-300"
+                  title="Create a new boundary layer"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Add Layer</span>
+                </button>
+              </div>
             </div>
 
             {/* List */}

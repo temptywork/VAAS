@@ -13,6 +13,7 @@ import {
   Trash2,
   Search,
   Eye,
+  EyeOff,
   ListFilter,
   AlertCircle,
 } from 'lucide-react';
@@ -35,6 +36,8 @@ interface AddFeatureModalProps {
   ) => void;
   existingCountByType: Record<string, number>;
   plottedFeatures?: ExerciseFeature[];
+  onToggleFeatureVisibility?: (id: string) => void;
+  onToggleAllFeatures?: (visible: boolean) => void;
   onDeleteFeature?: (id: string) => void;
   onDeleteAllFeatures?: () => void;
 }
@@ -88,6 +91,8 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
   onSelectFeatureForPlacement,
   existingCountByType,
   plottedFeatures = [],
+  onToggleFeatureVisibility,
+  onToggleAllFeatures,
   onDeleteFeature,
   onDeleteAllFeatures,
 }) => {
@@ -117,6 +122,7 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
   if (!isOpen) return null;
 
   const currentDef = FEATURE_LIBRARY[selectedType];
+  const allFeaturesVisible = plottedFeatures.length > 0 && plottedFeatures.every((f) => f.visible !== false);
 
   const filteredPlotted = plottedFeatures.filter((f) => {
     if (!plottedSearch.trim()) return true;
@@ -464,34 +470,58 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
                   />
                 </div>
 
-                {plottedFeatures.length > 0 && onDeleteAllFeatures && (
-                  !confirmDeleteAll ? (
+                <div className="flex items-center gap-2">
+                  {plottedFeatures.length > 0 && onToggleAllFeatures && (
                     <button
                       type="button"
-                      id="btn-plotted-clear-all"
-                      onClick={() => setConfirmDeleteAll(true)}
-                      className="flex items-center gap-1.5 text-[11px] font-mono text-rose-400 hover:text-rose-300 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/50 px-2.5 py-1.5 rounded-lg transition shrink-0"
-                      title="Delete all features plotted on canvas"
+                      id="btn-plotted-toggle-all-visibility"
+                      onClick={() => onToggleAllFeatures(!allFeaturesVisible)}
+                      className="flex items-center gap-1.5 text-[11px] font-mono text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1.5 rounded-lg transition shrink-0"
+                      title={allFeaturesVisible ? 'Hide all plotted features' : 'Unhide all plotted features'}
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Clear All ({plottedFeatures.length})</span>
+                      {allFeaturesVisible ? (
+                        <>
+                          <EyeOff className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Hide All</span>
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Unhide All</span>
+                        </>
+                      )}
                     </button>
-                  ) : (
-                    <button
-                      type="button"
-                      id="btn-plotted-confirm-clear-all"
-                      onClick={() => {
-                        onDeleteAllFeatures();
-                        setConfirmDeleteAll(false);
-                      }}
-                      className="flex items-center gap-1.5 text-[11px] font-mono text-white bg-rose-600 hover:bg-rose-500 font-bold px-2.5 py-1.5 rounded-lg transition shrink-0 animate-pulse shadow-md"
-                      title="Click again to confirm clearing all features"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Confirm Clear All ({plottedFeatures.length})?</span>
-                    </button>
-                  )
-                )}
+                  )}
+
+                  {plottedFeatures.length > 0 && onDeleteAllFeatures && (
+                    !confirmDeleteAll ? (
+                      <button
+                        type="button"
+                        id="btn-plotted-clear-all"
+                        onClick={() => setConfirmDeleteAll(true)}
+                        className="flex items-center gap-1.5 text-[11px] font-mono text-rose-400 hover:text-rose-300 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/50 px-2.5 py-1.5 rounded-lg transition shrink-0"
+                        title="Delete all features plotted on canvas"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Clear All ({plottedFeatures.length})</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        id="btn-plotted-confirm-clear-all"
+                        onClick={() => {
+                          onDeleteAllFeatures();
+                          setConfirmDeleteAll(false);
+                        }}
+                        className="flex items-center gap-1.5 text-[11px] font-mono text-white bg-rose-600 hover:bg-rose-500 font-bold px-2.5 py-1.5 rounded-lg transition shrink-0 animate-pulse shadow-md"
+                        title="Click again to confirm clearing all features"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Confirm Clear All ({plottedFeatures.length})?</span>
+                      </button>
+                    )
+                  )}
+                </div>
               </div>
 
               {/* Plotted Features List */}
@@ -575,16 +605,37 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
                           </div>
                         </div>
 
-                        {/* Right: Quick Delete Action */}
-                        <button
-                          type="button"
-                          onClick={() => onDeleteFeature && onDeleteFeature(feat.id)}
-                          className="flex items-center gap-1 text-xs text-rose-400 hover:text-white hover:bg-rose-900/60 border border-rose-900/30 hover:border-rose-700 px-2.5 py-1.5 rounded transition font-mono shrink-0"
-                          title="Delete this feature from canvas"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span className="hidden sm:inline">Delete</span>
-                        </button>
+                        {/* Right: Quick Visibility Toggle & Delete Actions */}
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {onToggleFeatureVisibility && (
+                            <button
+                              type="button"
+                              onClick={() => onToggleFeatureVisibility(feat.id)}
+                              className={`p-1.5 rounded transition border ${
+                                feat.visible !== false
+                                  ? 'text-sky-400 hover:text-sky-300 hover:bg-slate-800 border-slate-700'
+                                  : 'text-amber-400 bg-amber-950/40 hover:bg-amber-900/60 border-amber-800/40'
+                              }`}
+                              title={feat.visible !== false ? 'Hide feature' : 'Unhide feature'}
+                            >
+                              {feat.visible !== false ? (
+                                <Eye className="w-3.5 h-3.5" />
+                              ) : (
+                                <EyeOff className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => onDeleteFeature && onDeleteFeature(feat.id)}
+                            className="flex items-center gap-1 text-xs text-rose-400 hover:text-white hover:bg-rose-900/60 border border-rose-900/30 hover:border-rose-700 px-2.5 py-1.5 rounded transition font-mono shrink-0"
+                            title="Delete this feature from canvas"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span className="hidden sm:inline">Delete</span>
+                          </button>
+                        </div>
                       </div>
                     );
                   })}

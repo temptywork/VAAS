@@ -1,5 +1,5 @@
 import React from 'react';
-import { RegistrationMetrics, RegistrationQuality } from '../types';
+import { RegistrationMetrics, RegistrationQuality, VideoSourceType } from '../types';
 import {
   Activity,
   AlertCircle,
@@ -9,9 +9,14 @@ import {
   MapPin,
   Cpu,
   Info,
+  Camera,
+  Smartphone,
+  EyeOff,
+  Maximize,
 } from 'lucide-react';
 
 interface StatusBarProps {
+  sourceType?: VideoSourceType;
   isConnected: boolean;
   registrationMetrics: RegistrationMetrics;
   featureCount: number;
@@ -19,10 +24,14 @@ interface StatusBarProps {
   boundaryPointCount: number;
   isDrawingBoundary: boolean;
   minInliersThreshold: number;
+  allLayersVisible?: boolean;
+  onToggleAllLayers?: () => void;
+  onToggleFullscreen?: () => void;
   onOpenSettings: () => void;
 }
 
 export const StatusBar: React.FC<StatusBarProps> = ({
+  sourceType = 'simulator',
   isConnected,
   registrationMetrics,
   featureCount,
@@ -30,6 +39,9 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   boundaryPointCount,
   isDrawingBoundary,
   minInliersThreshold,
+  allLayersVisible = true,
+  onToggleAllLayers,
+  onToggleFullscreen,
   onOpenSettings,
 }) => {
   const { quality, inliers, totalMatches, fps, processingTimeMs } = registrationMetrics;
@@ -88,6 +100,30 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           >
             {isConnected ? 'CONNECTED' : 'DISCONNECTED'}
           </span>
+
+          {/* Active Source Badge */}
+          {sourceType === 'rear_camera' && (
+            <span className="flex items-center gap-1 text-emerald-300 bg-emerald-950/80 border border-emerald-500/40 px-1.5 py-0.5 rounded text-[10px] font-mono">
+              <Smartphone className="w-2.5 h-2.5 text-emerald-400" />
+              REAR CAM
+            </span>
+          )}
+          {sourceType === 'webcam' && (
+            <span className="flex items-center gap-1 text-sky-300 bg-sky-950/80 border border-sky-500/40 px-1.5 py-0.5 rounded text-[10px] font-mono">
+              <Camera className="w-2.5 h-2.5 text-sky-400" />
+              WEBCAM
+            </span>
+          )}
+          {sourceType === 'simulator' && (
+            <span className="text-slate-400 bg-slate-800/90 border border-slate-700 px-1.5 py-0.5 rounded text-[10px] font-mono">
+              SIMULATOR
+            </span>
+          )}
+          {sourceType === 'rtsp' && (
+            <span className="text-amber-300 bg-amber-950/80 border border-amber-500/40 px-1.5 py-0.5 rounded text-[10px] font-mono">
+              RTSP
+            </span>
+          )}
         </div>
 
         <div className="h-3.5 w-[1px] bg-slate-800" />
@@ -106,6 +142,18 @@ export const StatusBar: React.FC<StatusBarProps> = ({
 
       {/* Center / Right: Features, Boundary, FPS, Parallax warning */}
       <div className="flex items-center gap-3 flex-wrap">
+        {!allLayersVisible && (
+          <button
+            type="button"
+            onClick={onToggleAllLayers}
+            className="flex items-center gap-1 text-[10px] font-mono font-bold text-amber-300 bg-amber-950/80 border border-amber-500/50 px-2 py-0.5 rounded animate-pulse hover:bg-amber-900 transition"
+            title="All tactical layers are currently hidden. Click to unhide all layers."
+          >
+            <EyeOff className="w-3 h-3 text-amber-400" />
+            <span>LAYERS HIDDEN</span>
+          </button>
+        )}
+
         {/* Features Count */}
         <div className="flex items-center gap-1 text-slate-400 text-[11px]">
           <Layers className="w-3 h-3 text-sky-400" />
@@ -165,6 +213,19 @@ export const StatusBar: React.FC<StatusBarProps> = ({
         >
           VAAS v2.4
         </span>
+
+        {/* Maximize Fullscreen Trigger */}
+        {onToggleFullscreen && (
+          <button
+            id="status-bar-btn-maximize"
+            onClick={onToggleFullscreen}
+            className="flex items-center gap-1 text-[11px] font-mono text-sky-400 hover:text-sky-300 hover:bg-slate-800 px-1.5 py-0.5 rounded transition"
+            title="Maximize screen / Fullscreen preview (F)"
+          >
+            <Maximize className="w-3 h-3" />
+            <span className="hidden sm:inline">Maximize</span>
+          </button>
+        )}
       </div>
     </div>
   );

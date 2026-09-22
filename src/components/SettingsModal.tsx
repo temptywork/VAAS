@@ -1,13 +1,18 @@
 import React, { useState } from 'react';
-import { CameraConfig, OverlaySettings, RegistrationSettings } from '../types';
+import { CameraConfig, OverlaySettings, RegistrationSettings, VideoSourceType } from '../types';
 import {
   Settings,
   ShieldAlert,
   Camera,
   Activity,
   Layers,
+  Eye,
+  EyeOff,
   Info,
   Check,
+  Smartphone,
+  RotateCw,
+  Zap,
 } from 'lucide-react';
 
 interface SettingsModalProps {
@@ -20,6 +25,16 @@ interface SettingsModalProps {
   overlaySettings: OverlaySettings;
   onUpdateOverlaySettings: (settings: OverlaySettings) => void;
   onSetCurrentAsReference: () => void;
+  sourceType?: VideoSourceType;
+  onChangeSourceType?: (type: VideoSourceType) => void;
+  cameraFacingMode?: 'environment' | 'user';
+  onChangeFacingMode?: (mode: 'environment' | 'user') => void;
+  availableCameras?: MediaDeviceInfo[];
+  selectedCameraDeviceId?: string | null;
+  onSelectCameraDevice?: (id: string) => void;
+  isTorchOn?: boolean;
+  hasTorchSupport?: boolean;
+  onToggleTorch?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -32,6 +47,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   overlaySettings,
   onUpdateOverlaySettings,
   onSetCurrentAsReference,
+  sourceType = 'simulator',
+  onChangeSourceType,
+  cameraFacingMode = 'environment',
+  onChangeFacingMode,
+  availableCameras = [],
+  selectedCameraDeviceId,
+  onSelectCameraDevice,
+  isTorchOn = false,
+  hasTorchSupport = false,
+  onToggleTorch,
 }) => {
   const [activeSection, setActiveSection] = useState<'camera' | 'reg' | 'overlay' | 'limitations'>('reg');
 
@@ -219,7 +244,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <input
                     type="range"
                     min="4"
-                    max="20"
+                    max="25"
                     step="1"
                     value={regSettings.minInliers}
                     onChange={(e) =>
@@ -231,8 +256,78 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
                   />
                   <span className="text-[10px] text-slate-500 block mt-0.5">
-                    Threshold for GOOD registration state (PRD recommends ≥ 8).
+                    Threshold for GOOD registration state (PRD recommends ≥ 8, higher = stricter lock).
                   </span>
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-[11px] font-mono mb-1">
+                    <span className="text-slate-400">RANSAC Iteration Trials</span>
+                    <span className="text-emerald-400 font-bold">{regSettings.ransacIterations ?? 160} cycles</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="60"
+                    max="320"
+                    step="20"
+                    value={regSettings.ransacIterations ?? 160}
+                    onChange={(e) =>
+                      onUpdateRegSettings({
+                        ...regSettings,
+                        ransacIterations: parseInt(e.target.value),
+                      })
+                    }
+                    className="w-full accent-emerald-400 h-1.5 bg-slate-800 rounded"
+                  />
+                  <span className="text-[10px] text-slate-500 block mt-0.5">
+                    More iterations increase probability of discovering maximal inlier consensus under rapid motion or occlusion.
+                  </span>
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-[11px] font-mono mb-1">
+                    <span className="text-slate-400">Temporal Smoothing Responsiveness (α)</span>
+                    <span className="text-emerald-400 font-bold">{((regSettings.smoothingFactor ?? 0.65) * 100).toFixed(0)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.20"
+                    max="0.95"
+                    step="0.05"
+                    value={regSettings.smoothingFactor ?? 0.65}
+                    onChange={(e) =>
+                      onUpdateRegSettings({
+                        ...regSettings,
+                        smoothingFactor: parseFloat(e.target.value),
+                      })
+                    }
+                    className="w-full accent-emerald-400 h-1.5 bg-slate-800 rounded"
+                  />
+                  <span className="text-[10px] text-slate-500 block mt-0.5">
+                    Lower values (30–50%) filter jitter and micro-shakes; higher values (70–90%) give ultra-fast camera reaction.
+                  </span>
+                </div>
+
+                <div className="pt-2 border-t border-slate-800/80">
+                  <label className="flex items-center justify-between text-[11px] cursor-pointer">
+                    <div>
+                      <span className="text-slate-300 font-medium block">All-Inlier Least Squares Matrix Refinement</span>
+                      <span className="text-[10px] text-slate-500 block">
+                        Solves an overdetermined 8x8 normal system over all consensus inliers to eliminate single-quadrilateral warp jitter.
+                      </span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={regSettings.leastSquaresRefine !== false}
+                      onChange={(e) =>
+                        onUpdateRegSettings({
+                          ...regSettings,
+                          leastSquaresRefine: e.target.checked,
+                        })
+                      }
+                      className="w-4 h-4 accent-emerald-500 rounded"
+                    />
+                  </label>
                 </div>
               </div>
 
@@ -330,6 +425,47 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 />
               </div>
 
+              {/* Master Toggle */}
+              <div className="bg-slate-950/80 border border-slate-700/80 rounded-lg p-3">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <div className="flex items-center gap-2">
+                    {overlaySettings.showAllLayers !== false ? (
+                      <Eye className="w-4 h-4 text-emerald-400 shrink-0" />
+                    ) : (
+                      <EyeOff className="w-4 h-4 text-amber-400 shrink-0" />
+                    )}
+                    <div>
+                      <div className="text-slate-100 font-semibold text-xs flex items-center gap-2">
+                        <span>All Layers Visibility (Master Switch)</span>
+                        <span
+                          className={`text-[10px] font-mono px-1.5 py-0.5 rounded font-bold ${
+                            overlaySettings.showAllLayers !== false
+                              ? 'bg-emerald-950/80 border border-emerald-500/40 text-emerald-300'
+                              : 'bg-amber-950/80 border border-amber-500/40 text-amber-300'
+                          }`}
+                        >
+                          {overlaySettings.showAllLayers !== false ? 'VISIBLE' : 'HIDDEN'}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        Instantly hide or unhide all tactical AR overlay graphics, symbols, and boundaries.
+                      </p>
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={overlaySettings.showAllLayers !== false}
+                    onChange={(e) =>
+                      onUpdateOverlaySettings({
+                        ...overlaySettings,
+                        showAllLayers: e.target.checked,
+                      })
+                    }
+                    className="w-5 h-5 accent-sky-500 rounded ml-3"
+                  />
+                </label>
+              </div>
+
               {/* Toggles */}
               <div className="space-y-2 pt-2 border-t border-slate-800">
                 <label className="flex items-center justify-between p-2 rounded hover:bg-slate-800/60 cursor-pointer">
@@ -412,67 +548,278 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
           {/* Camera Settings (PRD Section 30 & 31) */}
           {activeSection === 'camera' && (
-            <div className="space-y-3.5">
-              <div>
-                <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1">
-                  RTSP Stream URL
-                </label>
-                <input
-                  type="text"
-                  value={cameraConfig.rtspUrl}
-                  onChange={(e) =>
-                    onUpdateCameraConfig({ ...cameraConfig, rtspUrl: e.target.value })
-                  }
-                  placeholder="rtsp://admin:pass@192.168.1.100:554/stream"
-                  className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
-                />
+            <div className="space-y-4">
+              {/* Primary Video Feed Selection */}
+              <div className="bg-slate-950/70 border border-slate-800 rounded p-3 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                    <Camera className="w-3.5 h-3.5 text-sky-400" />
+                    Video Feed Source
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-400 uppercase bg-slate-900 border border-slate-700 px-1.5 py-0.5 rounded">
+                    Active: {sourceType.toUpperCase().replace('_', ' ')}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onChangeSourceType?.('rear_camera')}
+                    className={`flex items-start gap-2.5 p-2.5 rounded border text-left transition ${
+                      sourceType === 'rear_camera'
+                        ? 'bg-emerald-950/40 border-emerald-500 text-emerald-200 ring-1 ring-emerald-500/50'
+                        : 'bg-slate-900/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    <Smartphone className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="text-xs font-semibold flex items-center gap-1.5">
+                        <span>Mobile Rear Camera</span>
+                        <span className="text-[9px] bg-emerald-900/80 text-emerald-300 px-1 rounded font-mono">
+                          RECOMMENDED
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        Uses mobile device's back camera (environment-facing) for tactical terrain and boundary tracking.
+                      </div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => onChangeSourceType?.('webcam')}
+                    className={`flex items-start gap-2.5 p-2.5 rounded border text-left transition ${
+                      sourceType === 'webcam'
+                        ? 'bg-sky-950/40 border-sky-500 text-sky-200 ring-1 ring-sky-500/50'
+                        : 'bg-slate-900/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    <Camera className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="text-xs font-semibold">Webcam / Front Camera</div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        Standard webcam or front-facing sensor for operator console / indoor testing.
+                      </div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => onChangeSourceType?.('simulator')}
+                    className={`flex items-start gap-2.5 p-2.5 rounded border text-left transition ${
+                      sourceType === 'simulator'
+                        ? 'bg-sky-950/40 border-sky-500 text-sky-200 ring-1 ring-sky-500/50'
+                        : 'bg-slate-900/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    <Activity className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="text-xs font-semibold">Exercise Simulator</div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        Synthetic procedural range environment with Pan-Tilt-Zoom and FLIR thermal simulation.
+                      </div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => onChangeSourceType?.('rtsp')}
+                    className={`flex items-start gap-2.5 p-2.5 rounded border text-left transition ${
+                      sourceType === 'rtsp'
+                        ? 'bg-sky-950/40 border-sky-500 text-sky-200 ring-1 ring-sky-500/50'
+                        : 'bg-slate-900/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    <Layers className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="text-xs font-semibold">RTSP IP Camera Stream</div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        Connect to external PTZ camera or drone stream over local RTSP network.
+                      </div>
+                    </div>
+                  </button>
+                </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              {/* Mobile / Hardware Camera Controls (when mobile rear cam or webcam selected) */}
+              {(sourceType === 'rear_camera' || sourceType === 'webcam') && (
+                <div className="bg-slate-950/70 border border-slate-800 rounded p-3 space-y-3">
+                  <div className="text-xs font-semibold text-slate-200 flex items-center justify-between">
+                    <span className="flex items-center gap-1.5">
+                      <Smartphone className="w-3.5 h-3.5 text-emerald-400" />
+                      Mobile Lens & Hardware Parameters
+                    </span>
+                    {hasTorchSupport && (
+                      <span className="text-[10px] text-amber-400 font-mono flex items-center gap-1">
+                        <Zap className="w-3 h-3 fill-amber-400" /> Flashlight Ready
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {/* Facing Mode Selector */}
+                    <div>
+                      <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1">
+                        Lens Orientation
+                      </label>
+                      <div className="flex rounded border border-slate-800 overflow-hidden bg-slate-900 p-0.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onChangeFacingMode?.('environment');
+                            onChangeSourceType?.('rear_camera');
+                          }}
+                          className={`flex-1 py-1 px-2 text-xs font-mono rounded transition flex items-center justify-center gap-1 ${
+                            sourceType === 'rear_camera' || cameraFacingMode === 'environment'
+                              ? 'bg-emerald-600 text-white font-semibold'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          <Smartphone className="w-3 h-3" />
+                          Rear Camera
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onChangeFacingMode?.('user');
+                            onChangeSourceType?.('webcam');
+                          }}
+                          className={`flex-1 py-1 px-2 text-xs font-mono rounded transition flex items-center justify-center gap-1 ${
+                            sourceType === 'webcam' && cameraFacingMode === 'user'
+                              ? 'bg-sky-600 text-white font-semibold'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          <Camera className="w-3 h-3" />
+                          Front / Selfie
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Physical Device / Sensor Picker */}
+                    <div>
+                      <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1">
+                        Camera Sensor Device
+                      </label>
+                      <select
+                        value={selectedCameraDeviceId || ''}
+                        onChange={(e) => onSelectCameraDevice?.(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
+                      >
+                        <option value="">Default System Lens</option>
+                        {availableCameras.map((cam, idx) => (
+                          <option key={cam.deviceId || idx} value={cam.deviceId}>
+                            {cam.label || `Camera Sensor ${idx + 1}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Resolution and Torch Controls */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1">
+                        Capture Stream Resolution
+                      </label>
+                      <select
+                        value={`${cameraConfig.resolution[0]}x${cameraConfig.resolution[1]}`}
+                        onChange={(e) => {
+                          const [w, h] = e.target.value.split('x').map(Number);
+                          onUpdateCameraConfig({ ...cameraConfig, resolution: [w, h] });
+                        }}
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
+                      >
+                        <option value="1920x1080">1080p Full HD (1920 x 1080) [Default]</option>
+                        <option value="1280x720">720p HD (1280 x 720) [High FPS]</option>
+                        <option value="3840x2160">4K Ultra HD (3840 x 2160) [High Precision]</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1">
+                        Tactical Torch / Flashlight
+                      </label>
+                      {hasTorchSupport && onToggleTorch ? (
+                        <button
+                          type="button"
+                          onClick={onToggleTorch}
+                          className={`w-full py-1.5 px-3 rounded border text-xs font-mono flex items-center justify-center gap-1.5 transition ${
+                            isTorchOn
+                              ? 'bg-amber-500 text-slate-950 font-bold border-amber-400 shadow-sm'
+                              : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
+                          }`}
+                        >
+                          <Zap className={`w-3.5 h-3.5 ${isTorchOn ? 'fill-current' : 'text-amber-400'}`} />
+                          <span>{isTorchOn ? 'Mobile Torch: ACTIVE' : 'Enable Mobile Torch'}</span>
+                        </button>
+                      ) : (
+                        <div className="text-[11px] text-slate-500 font-mono py-1.5 px-2 bg-slate-900/50 rounded border border-slate-800">
+                          Torch available when mobile rear camera is active
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* RTSP Stream Settings */}
+              <div className="bg-slate-950/70 border border-slate-800 rounded p-3 space-y-3">
+                <div className="text-xs font-semibold text-slate-200">RTSP IP Camera Parameters</div>
                 <div>
                   <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1">
-                    Reconnect Interval (seconds)
+                    RTSP Stream URL
                   </label>
                   <input
-                    type="number"
-                    min="1"
-                    max="60"
-                    value={cameraConfig.reconnectIntervalSec}
+                    type="text"
+                    value={cameraConfig.rtspUrl}
                     onChange={(e) =>
-                      onUpdateCameraConfig({
-                        ...cameraConfig,
-                        reconnectIntervalSec: parseInt(e.target.value) || 5,
-                      })
+                      onUpdateCameraConfig({ ...cameraConfig, rtspUrl: e.target.value })
                     }
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
+                    placeholder="rtsp://admin:pass@192.168.1.100:554/stream"
+                    className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
                   />
                 </div>
 
-                <div>
-                  <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1">
-                    Buffer Size (frames)
-                  </label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="10"
-                    value={cameraConfig.bufferSize}
-                    onChange={(e) =>
-                      onUpdateCameraConfig({
-                        ...cameraConfig,
-                        bufferSize: parseInt(e.target.value) || 2,
-                      })
-                    }
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
-                  />
-                </div>
-              </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1">
+                      Reconnect Interval (sec)
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="60"
+                      value={cameraConfig.reconnectIntervalSec}
+                      onChange={(e) =>
+                        onUpdateCameraConfig({
+                          ...cameraConfig,
+                          reconnectIntervalSec: parseInt(e.target.value) || 5,
+                        })
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
 
-              <div className="bg-slate-950/60 border border-slate-800 rounded p-3 text-[11px] text-slate-400 space-y-1">
-                <div className="text-slate-200 font-semibold mb-1">Camera Stream Integration Note:</div>
-                <p>
-                  For desktop deployment (PyInstaller/Windows), OpenCV natively captures RTSP via ffmpeg. In this web-based operator console, the simulator and local camera test feeds provide instantaneous testing, and RTSP feeds stream via WebRTC/HLS proxy.
-                </p>
+                  <div>
+                    <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1">
+                      Buffer Size (frames)
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="10"
+                      value={cameraConfig.bufferSize}
+                      onChange={(e) =>
+                        onUpdateCameraConfig({
+                          ...cameraConfig,
+                          bufferSize: parseInt(e.target.value) || 2,
+                        })
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
+                </div>
               </div>
             </div>
           )}

@@ -6,6 +6,7 @@ import {
   BoundaryConfig,
   RegistrationMetrics,
   OverlaySettings,
+  VideoSourceType,
 } from '../types';
 import { FEATURE_LIBRARY } from '../data/featureDefinitions';
 import { projectPoint, invertHomography } from '../cv/homography';
@@ -22,7 +23,7 @@ import {
 
 interface TacticalCanvasProps {
   engine: VisualRegistrationEngine;
-  sourceType: 'simulator' | 'webcam' | 'rtsp';
+  sourceType: VideoSourceType;
   simState: SimulatorCameraState;
   features: ExerciseFeature[];
   boundaries?: ExerciseBoundary[];
@@ -105,10 +106,24 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
       // 1. Render Video Source
       if (sourceType === 'simulator') {
         terrainRendererRef.current.render(ctx, width, height, simState);
-      } else if (sourceType === 'webcam' && videoElement && videoElement.readyState >= 2) {
+      } else if ((sourceType === 'webcam' || sourceType === 'rear_camera') && videoElement && videoElement.readyState >= 2) {
         ctx.drawImage(videoElement, 0, 0, width, height);
+      } else if (sourceType === 'webcam' || sourceType === 'rear_camera') {
+        // Connecting or waiting for camera stream
+        ctx.fillStyle = '#090d16';
+        ctx.fillRect(0, 0, width, height);
+        ctx.fillStyle = '#38bdf8';
+        ctx.font = '13px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(
+          sourceType === 'rear_camera'
+            ? 'CONNECTING TO MOBILE REAR CAMERA (ENVIRONMENT)...'
+            : 'CONNECTING TO WEBCAM / FRONT CAMERA...',
+          width / 2,
+          height / 2
+        );
       } else {
-        // Fallback or connecting state
+        // Fallback or connecting state for RTSP
         ctx.fillStyle = '#090d16';
         ctx.fillRect(0, 0, width, height);
         ctx.fillStyle = '#38bdf8';
@@ -117,8 +132,11 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
         ctx.fillText('CONNECTING TO RTSP STREAM SOURCE...', width / 2, height / 2);
       }
 
+      // Master switch for all AR tactical overlay layers
+      const isMasterLayersVisible = overlaySettings.showAllLayers !== false;
+
       // 2. Draw Subtle Military Reticle / Crosshairs
-      if (overlaySettings.showHUD) {
+      if (overlaySettings.showHUD && isMasterLayersVisible) {
         ctx.save();
         ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
         ctx.lineWidth = 1;
@@ -153,7 +171,7 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
       const H = engine.getHomography();
 
       // 3. Draw CV Tracking Keypoints and Inliers (if enabled)
-      if (overlaySettings.showTrackingFeatures && H) {
+      if (overlaySettings.showTrackingFeatures && H && isMasterLayersVisible) {
         ctx.save();
         // Inlier match vectors
         const inliers = engine.getInliers();
@@ -209,7 +227,7 @@ function hexToRgba(hex: string, alpha: number) {
 }
 
       // 4. Draw Exercise Boundaries (Supports multiple layers, custom colors, thickness, closed areas, and labels)
-      if (overlaySettings.showBoundary) {
+      if (overlaySettings.showBoundary && isMasterLayersVisible) {
         const renderBoundaryLayer = (
           pts: BoundaryPoint[],
           color: string,
@@ -335,7 +353,7 @@ function hexToRgba(hex: string, alpha: number) {
       }
 
       // 5. Draw Exercise Features (Symbols and Labels)
-      if (overlaySettings.showSymbols) {
+      if (overlaySettings.showSymbols && isMasterLayersVisible) {
         features.forEach((feat) => {
           if (!feat.visible) return;
           const [cx, cy] = transformCoord(feat.x, feat.y);
@@ -673,26 +691,30 @@ function hexToRgba(hex: string, alpha: number) {
       return;
     }
 
-    // Otherwise, check if user clicked an existing feature to select it
+    // Otherwise, check if user clicked an existing feature to select it (only if features are currently visible)
     let clickedFeature: ExerciseFeature | null = null;
-    for (let i = features.length - 1; i >= 0; i--) {
-      const feat = features[i];
-      // Project ref coordinates to current screen
-      let featScreenX = feat.x;
-      let featScreenY = feat.y;
-      if (H) {
-        const [px, py] = projectPoint(
-          H,
-          (feat.x / canvas.width) * 640,
-          (feat.y / canvas.height) * 360
-        );
-        featScreenX = (px / 640) * canvas.width;
-        featScreenY = (py / 360) * canvas.height;
-      }
-      const dist = Math.hypot(screenX - featScreenX, screenY - featScreenY);
-      if (dist <= 24) {
-        clickedFeature = feat;
-        break;
+    const isMasterVisible = overlaySettings.showAllLayers !== false && overlaySettings.showSymbols !== false;
+    if (isMasterVisible) {
+      for (let i = features.length - 1; i >= 0; i--) {
+        const feat = features[i];
+        if (!feat.visible) continue;
+        // Project ref coordinates to current screen
+        let featScreenX = feat.x;
+        let featScreenY = feat.y;
+        if (H) {
+          const [px, py] = projectPoint(
+            H,
+            (feat.x / canvas.width) * 640,
+            (feat.y / canvas.height) * 360
+          );
+          featScreenX = (px / 640) * canvas.width;
+          featScreenY = (py / 360) * canvas.height;
+        }
+        const dist = Math.hypot(screenX - featScreenX, screenY - featScreenY);
+        if (dist <= 24) {
+          clickedFeature = feat;
+          break;
+        }
       }
     }
 
@@ -709,22 +731,26 @@ function hexToRgba(hex: string, alpha: number) {
 
     // Check hover
     let isNear = false;
-    const H = engine.getHomography();
-    for (const feat of features) {
-      let fx = feat.x;
-      let fy = feat.y;
-      if (H) {
-        const [px, py] = projectPoint(
-          H,
-          (feat.x / canvas.width) * 640,
-          (feat.y / canvas.height) * 360
-        );
-        fx = (px / 640) * canvas.width;
-        fy = (py / 360) * canvas.height;
-      }
-      if (Math.hypot(x - fx, y - fy) <= 24) {
-        isNear = true;
-        break;
+    const isMasterVisible = overlaySettings.showAllLayers !== false && overlaySettings.showSymbols !== false;
+    if (isMasterVisible) {
+      const H = engine.getHomography();
+      for (const feat of features) {
+        if (!feat.visible) continue;
+        let fx = feat.x;
+        let fy = feat.y;
+        if (H) {
+          const [px, py] = projectPoint(
+            H,
+            (feat.x / canvas.width) * 640,
+            (feat.y / canvas.height) * 360
+          );
+          fx = (px / 640) * canvas.width;
+          fy = (py / 360) * canvas.height;
+        }
+        if (Math.hypot(x - fx, y - fy) <= 24) {
+          isNear = true;
+          break;
+        }
       }
     }
     setIsHoveringFeature(isNear);

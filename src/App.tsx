@@ -10,11 +10,13 @@ import {
   RegistrationMetrics,
   RegistrationSettings,
   ScenarioData,
+  VideoSourceType,
 } from './types';
 import { VisualRegistrationEngine } from './cv/registrationEngine';
 import { TacticalCanvas } from './components/TacticalCanvas';
 import { Toolbar } from './components/Toolbar';
 import { StatusBar } from './components/StatusBar';
+import { FullscreenRibbon } from './components/FullscreenRibbon';
 import { AddFeatureModal, CustomPlacementOptions } from './components/AddFeatureModal';
 import { BoundaryConfigModal } from './components/BoundaryConfigModal';
 import { ScenarioModal } from './components/ScenarioModal';
@@ -31,9 +33,15 @@ export default function App() {
   const cvCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const cvTerrainRendererRef = useRef<ExerciseTerrainRenderer>(new ExerciseTerrainRenderer());
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
+  const activeStreamRef = useRef<MediaStream | null>(null);
 
   // Camera & Stream State
-  const [sourceType, setSourceType] = useState<'simulator' | 'webcam' | 'rtsp'>('simulator');
+  const [sourceType, setSourceType] = useState<VideoSourceType>('simulator');
+  const [cameraFacingMode, setCameraFacingMode] = useState<'environment' | 'user'>('environment');
+  const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
+  const [selectedCameraDeviceId, setSelectedCameraDeviceId] = useState<string | null>(null);
+  const [isTorchOn, setIsTorchOn] = useState<boolean>(false);
+  const [hasTorchSupport, setHasTorchSupport] = useState<boolean>(false);
   const [rtspUrl, setRtspUrl] = useState<string>('rtsp://exercise-control:sec88@192.168.1.100:554/live');
   const [isConnected, setIsConnected] = useState<boolean>(true);
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
@@ -134,10 +142,13 @@ export default function App() {
 
   const [regSettings, setRegSettings] = useState<RegistrationSettings>({
     enabled: true,
-    maxFeatures: 220,
+    maxFeatures: 260,
     matchRatioThreshold: 0.74,
     ransacThresholdPx: 4.5,
     minInliers: 8,
+    ransacIterations: 160,
+    smoothingFactor: 0.65,
+    leastSquaresRefine: true,
     adaptiveReference: false,
     updateIntervalMs: 33,
   });
@@ -147,6 +158,7 @@ export default function App() {
     textSize: 12,
     opacity: 0.9,
     boundaryThickness: 3,
+    showAllLayers: true,
     showLabels: true,
     showSymbols: true,
     showBoundary: true,
@@ -162,6 +174,60 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
   const [showSimControls, setShowSimControls] = useState<boolean>(true);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const appContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Toggle Fullscreen / Maximize Screen
+  const handleToggleFullscreen = useCallback(() => {
+    setIsFullscreen((prev) => {
+      const next = !prev;
+      // Also request browser fullscreen if permitted, otherwise state provides container-level maximize
+      if (next) {
+        try {
+          if (appContainerRef.current && !document.fullscreenElement) {
+            appContainerRef.current.requestFullscreen?.().catch(() => {});
+          }
+        } catch {
+          // In sandboxed iframes, container maximize operates cleanly via state
+        }
+      } else {
+        try {
+          if (document.fullscreenElement) {
+            document.exitFullscreen?.().catch(() => {});
+          }
+        } catch {}
+      }
+      return next;
+    });
+  }, []);
+
+  // Listen for browser fullscreen changes & Escape key
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (!document.fullscreenElement && isFullscreen) {
+        setIsFullscreen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isFullscreen) {
+        setIsFullscreen(false);
+      }
+      // F key shortcut for fast full-screen toggle when not in an input
+      if (
+        (e.key === 'f' || e.key === 'F') &&
+        !['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)
+      ) {
+        handleToggleFullscreen();
+      }
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isFullscreen, handleToggleFullscreen]);
 
   // Local Scenario Catalog
   const [savedScenarios, setSavedScenarios] = useState<ScenarioData[]>(() => {
@@ -191,32 +257,84 @@ export default function App() {
     cvCanvasRef.current = cvCanvas;
   }, []);
 
-  // Handle Webcam Source Switch
+  // Handle Webcam and Mobile Rear Camera Source Switch
   useEffect(() => {
     let currentStream: MediaStream | null = null;
     let videoEl: HTMLVideoElement | null = null;
 
-    if (sourceType === 'webcam' && isConnected) {
+    if ((sourceType === 'webcam' || sourceType === 'rear_camera') && isConnected) {
       videoEl = document.createElement('video');
       videoEl.autoplay = true;
       videoEl.playsInline = true;
       videoEl.muted = true;
 
+      // Determine facingMode: 'environment' for rear camera, otherwise cameraFacingMode
+      const targetFacingMode = sourceType === 'rear_camera' ? 'environment' : cameraFacingMode;
+
+      const videoConstraints: MediaTrackConstraints = {
+        width: { ideal: cameraConfig.resolution[0] || 1920, min: 640 },
+        height: { ideal: cameraConfig.resolution[1] || 1080, min: 360 },
+      };
+
+      if (selectedCameraDeviceId) {
+        videoConstraints.deviceId = { exact: selectedCameraDeviceId };
+      } else {
+        videoConstraints.facingMode = { ideal: targetFacingMode };
+      }
+
       navigator.mediaDevices
-        ?.getUserMedia({ video: { width: 1280, height: 720 } })
+        ?.getUserMedia({ video: videoConstraints })
         .then((stream) => {
           currentStream = stream;
+          activeStreamRef.current = stream;
+
+          // Check for torch capability (available on many mobile back cameras)
+          const track = stream.getVideoTracks()[0];
+          if (track && typeof (track as any).getCapabilities === 'function') {
+            const caps = (track as any).getCapabilities();
+            setHasTorchSupport(Boolean(caps && caps.torch));
+          } else {
+            setHasTorchSupport(false);
+          }
+
           if (videoEl) {
             videoEl.srcObject = stream;
-            videoEl.play();
+            videoEl.play().catch((e) => console.warn('Video play error:', e));
             videoElementRef.current = videoEl;
             setVideoElement(videoEl);
           }
+
+          // Enumerate connected cameras
+          if (navigator.mediaDevices?.enumerateDevices) {
+            navigator.mediaDevices
+              .enumerateDevices()
+              .then((devices) => {
+                const videoInputs = devices.filter((d) => d.kind === 'videoinput');
+                setAvailableCameras(videoInputs);
+              })
+              .catch(console.warn);
+          }
         })
         .catch((err) => {
-          console.warn('Webcam stream error:', err);
-          alert('Unable to access webcam. Switching back to Exercise Feed Simulator.');
-          setSourceType('simulator');
+          console.warn('Camera stream error with target constraints:', err);
+          // Graceful fallback to any available video input if facingMode constraint fails
+          navigator.mediaDevices
+            ?.getUserMedia({ video: true })
+            .then((stream) => {
+              currentStream = stream;
+              activeStreamRef.current = stream;
+              if (videoEl) {
+                videoEl.srcObject = stream;
+                videoEl.play().catch(console.warn);
+                videoElementRef.current = videoEl;
+                setVideoElement(videoEl);
+              }
+            })
+            .catch((fallbackErr) => {
+              console.warn('Camera fallback stream error:', fallbackErr);
+              alert('Unable to access camera device. Switching back to Exercise Feed Simulator.');
+              setSourceType('simulator');
+            });
         });
     } else {
       if (videoElementRef.current) {
@@ -225,12 +343,52 @@ export default function App() {
         videoElementRef.current = null;
         setVideoElement(null);
       }
+      if (activeStreamRef.current) {
+        activeStreamRef.current.getTracks().forEach((track) => track.stop());
+        activeStreamRef.current = null;
+      }
+      setIsTorchOn(false);
+      setHasTorchSupport(false);
     }
 
     return () => {
       currentStream?.getTracks().forEach((track) => track.stop());
+      setIsTorchOn(false);
     };
-  }, [sourceType, isConnected]);
+  }, [sourceType, isConnected, cameraFacingMode, selectedCameraDeviceId, cameraConfig.resolution]);
+
+  // Mobile Torch / Flashlight Toggle Handler
+  const handleToggleTorch = async () => {
+    const stream = activeStreamRef.current;
+    if (!stream) return;
+    const track = stream.getVideoTracks()[0];
+    if (!track) return;
+    try {
+      const nextState = !isTorchOn;
+      // @ts-ignore
+      await track.applyConstraints({ advanced: [{ torch: nextState }] });
+      setIsTorchOn(nextState);
+    } catch (err) {
+      console.warn('Torch constraint error:', err);
+    }
+  };
+
+  // Quick Camera Facing Flip (Rear <-> Front)
+  const handleToggleCameraFacing = () => {
+    if (sourceType === 'rear_camera') {
+      setSourceType('webcam');
+      setCameraFacingMode('user');
+      setSelectedCameraDeviceId(null);
+    } else if (sourceType === 'webcam') {
+      setSourceType('rear_camera');
+      setCameraFacingMode('environment');
+      setSelectedCameraDeviceId(null);
+    } else {
+      setSourceType('rear_camera');
+      setCameraFacingMode('environment');
+      setSelectedCameraDeviceId(null);
+    }
+  };
 
   // Set initial Reference Frame once canvas is mounted
   const captureAndSetReference = useCallback(() => {
@@ -241,7 +399,11 @@ export default function App() {
 
     if (sourceType === 'simulator') {
       cvTerrainRendererRef.current.render(ctx, 640, 360, simState);
-    } else if (sourceType === 'webcam' && videoElementRef.current && videoElementRef.current.readyState >= 2) {
+    } else if (
+      (sourceType === 'webcam' || sourceType === 'rear_camera') &&
+      videoElementRef.current &&
+      videoElementRef.current.readyState >= 2
+    ) {
       ctx.drawImage(videoElementRef.current, 0, 0, 640, 360);
     } else {
       // Fallback synthetic texture
@@ -265,6 +427,11 @@ export default function App() {
       return () => clearTimeout(timer);
     }
   }, [isConnected, captureAndSetReference]);
+
+  // Synchronize Registration Settings into the CV Engine
+  useEffect(() => {
+    engineRef.current.settings = { ...regSettings };
+  }, [regSettings]);
 
   // Main CV Processing Loop (at 30 FPS)
   useEffect(() => {
@@ -293,7 +460,11 @@ export default function App() {
       // Render into CV canvas at 640x360
       if (sourceType === 'simulator') {
         cvTerrainRendererRef.current.render(ctx, 640, 360, simState);
-      } else if (sourceType === 'webcam' && videoElementRef.current && videoElementRef.current.readyState >= 2) {
+      } else if (
+        (sourceType === 'webcam' || sourceType === 'rear_camera') &&
+        videoElementRef.current &&
+        videoElementRef.current.readyState >= 2
+      ) {
         ctx.drawImage(videoElementRef.current, 0, 0, 640, 360);
       }
 
@@ -345,6 +516,16 @@ export default function App() {
     setPendingFeatureOptions({});
   };
 
+  const handleToggleFeatureVisibility = (id: string) => {
+    setFeatures((prev) =>
+      prev.map((f) => (f.id === id ? { ...f, visible: f.visible === false ? true : false } : f))
+    );
+  };
+
+  const handleToggleAllFeatures = (visible: boolean) => {
+    setFeatures((prev) => prev.map((f) => ({ ...f, visible })));
+  };
+
   // Boundary Management Handlers (Multi-boundary support)
   const handleAddBoundary = () => {
     const palette = ['#ef4444', '#f59e0b', '#38bdf8', '#22c55e', '#a855f7', '#eab308', '#ec4899'];
@@ -380,6 +561,21 @@ export default function App() {
     setBoundaries((prev) =>
       prev.map((b) => (b.id === id ? { ...b, visible: b.visible === false ? true : false } : b))
     );
+  };
+
+  const handleToggleAllBoundaries = (visible: boolean) => {
+    setBoundaries((prev) => prev.map((b) => ({ ...b, visible })));
+  };
+
+  // Master switch to hide/unhide all tactical layers at once (features, boundaries, overlays)
+  const handleToggleAllLayers = () => {
+    setOverlaySettings((prev) => {
+      const nextShowAll = prev.showAllLayers === false ? true : false;
+      return {
+        ...prev,
+        showAllLayers: nextShowAll,
+      };
+    });
   };
 
   const handleClearBoundaryPoints = (id: string) => {
@@ -614,50 +810,72 @@ export default function App() {
 
   return (
     <div
+      ref={appContainerRef}
       id="rtsp-exercise-system-root"
-      className="flex flex-col h-screen w-screen bg-slate-950 text-slate-100 overflow-hidden font-sans select-none"
+      className="relative flex flex-col h-screen w-screen bg-slate-950 text-slate-100 overflow-hidden font-sans select-none"
     >
-      {/* Top Application Header & Toolbar */}
-      <Toolbar
-        sourceType={sourceType}
-        onChangeSourceType={(type) => {
-          setSourceType(type);
-          setTimeout(() => captureAndSetReference(), 200);
-        }}
-        rtspUrl={rtspUrl}
-        onChangeRtspUrl={setRtspUrl}
-        isConnected={isConnected}
-        onConnect={() => {
-          setIsConnected(true);
-          setTimeout(() => captureAndSetReference(), 200);
-        }}
-        onDisconnect={() => setIsConnected(false)}
-        isDrawingBoundary={isDrawingBoundary}
-        activeBoundaryPointsCount={activeBoundaryPoints.length}
-        onStartBoundary={() => handleStartDrawingBoundary()}
-        onFinishBoundary={handleFinishBoundary}
-        onClearLastBoundaryPoint={handleClearLastBoundaryPoint}
-        onCancelBoundary={handleCancelBoundary}
-        onClearAll={handleClearAll}
-        boundaryConfig={boundaries.find((b) => b.id === selectedBoundaryId) || boundaries[0]}
-        boundariesCount={boundaries.length}
-        onOpenBoundaryConfig={() => setIsBoundaryConfigOpen(true)}
-        onOpenAddFeature={() => setIsAddFeatureOpen(true)}
-        onOpenSaveScenario={() => setScenarioModalMode('save')}
-        onOpenLoadScenario={() => setScenarioModalMode('load')}
-        onSetCurrentAsReference={captureAndSetReference}
-        visualRegEnabled={regSettings.enabled}
-        onToggleVisualReg={() =>
-          setRegSettings((prev) => ({ ...prev, enabled: !prev.enabled }))
-        }
-        showDiagnostics={showDiagnostics}
-        onToggleDiagnostics={() => setShowDiagnostics((prev) => !prev)}
-        showSimControls={showSimControls}
-        onToggleSimControls={() => setShowSimControls((prev) => !prev)}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-        registrationQuality={registrationMetrics.quality}
-        hasReference={registrationMetrics.quality !== 'UNINITIALIZED'}
-      />
+      {/* Top Application Header & Toolbar (Hidden when in Fullscreen/Maximized Mode) */}
+      {!isFullscreen && (
+        <Toolbar
+          sourceType={sourceType}
+          onChangeSourceType={(type) => {
+            setSourceType(type);
+            if (type === 'rear_camera') {
+              setCameraFacingMode('environment');
+              setSelectedCameraDeviceId(null);
+            } else if (type === 'webcam') {
+              setCameraFacingMode('user');
+              setSelectedCameraDeviceId(null);
+            }
+            setTimeout(() => captureAndSetReference(), 200);
+          }}
+          cameraFacingMode={cameraFacingMode}
+          onToggleCameraFacing={handleToggleCameraFacing}
+          availableCameras={availableCameras}
+          selectedCameraDeviceId={selectedCameraDeviceId}
+          onSelectCameraDevice={setSelectedCameraDeviceId}
+          isTorchOn={isTorchOn}
+          hasTorchSupport={hasTorchSupport}
+          onToggleTorch={handleToggleTorch}
+          rtspUrl={rtspUrl}
+          onChangeRtspUrl={setRtspUrl}
+          isConnected={isConnected}
+          onConnect={() => {
+            setIsConnected(true);
+            setTimeout(() => captureAndSetReference(), 200);
+          }}
+          onDisconnect={() => setIsConnected(false)}
+          isDrawingBoundary={isDrawingBoundary}
+          activeBoundaryPointsCount={activeBoundaryPoints.length}
+          onStartBoundary={() => handleStartDrawingBoundary()}
+          onFinishBoundary={handleFinishBoundary}
+          onClearLastBoundaryPoint={handleClearLastBoundaryPoint}
+          onCancelBoundary={handleCancelBoundary}
+          onClearAll={handleClearAll}
+          boundaryConfig={boundaries.find((b) => b.id === selectedBoundaryId) || boundaries[0]}
+          boundariesCount={boundaries.length}
+          allLayersVisible={overlaySettings.showAllLayers !== false}
+          onToggleAllLayers={handleToggleAllLayers}
+          onOpenBoundaryConfig={() => setIsBoundaryConfigOpen(true)}
+          onOpenAddFeature={() => setIsAddFeatureOpen(true)}
+          onOpenSaveScenario={() => setScenarioModalMode('save')}
+          onOpenLoadScenario={() => setScenarioModalMode('load')}
+          onSetCurrentAsReference={captureAndSetReference}
+          visualRegEnabled={regSettings.enabled}
+          onToggleVisualReg={() =>
+            setRegSettings((prev) => ({ ...prev, enabled: !prev.enabled }))
+          }
+          showDiagnostics={showDiagnostics}
+          onToggleDiagnostics={() => setShowDiagnostics((prev) => !prev)}
+          showSimControls={showSimControls}
+          onToggleSimControls={() => setShowSimControls((prev) => !prev)}
+          isFullscreen={isFullscreen}
+          onToggleFullscreen={handleToggleFullscreen}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          registrationQuality={registrationMetrics.quality}
+          hasReference={registrationMetrics.quality !== 'UNINITIALIZED'}
+        />
+      )}
 
       {/* Main Single Live-Video Canvas (PRD Section 1, 6, 27) */}
       <div id="tactical-canvas-viewport" className="relative flex-1 w-full h-full min-h-0 bg-black">
@@ -711,22 +929,59 @@ export default function App() {
           settings={regSettings}
           engine={engineRef.current}
         />
+
+        {/* Fullscreen Bottom Ribbon (Floating Glass Ribbon with basic tactical options) */}
+        {isFullscreen && (
+          <FullscreenRibbon
+            isFullscreen={isFullscreen}
+            onToggleFullscreen={handleToggleFullscreen}
+            allLayersVisible={overlaySettings.showAllLayers !== false}
+            onToggleAllLayers={handleToggleAllLayers}
+            sourceType={sourceType}
+            onChangeSourceType={(type) => {
+              setSourceType(type);
+              if (type === 'rear_camera') {
+                setCameraFacingMode('environment');
+                setSelectedCameraDeviceId(null);
+              } else if (type === 'webcam') {
+                setCameraFacingMode('user');
+                setSelectedCameraDeviceId(null);
+              }
+              setTimeout(() => captureAndSetReference(), 200);
+            }}
+            onSetCurrentAsReference={captureAndSetReference}
+            onOpenAddFeature={() => setIsAddFeatureOpen(true)}
+            onOpenBoundaryConfig={() => setIsBoundaryConfigOpen(true)}
+            onOpenSettings={() => setIsSettingsOpen(true)}
+            registrationMetrics={registrationMetrics}
+            featureCount={features.length}
+            boundariesCount={boundaries.length}
+            showSimControls={showSimControls}
+            onToggleSimControls={() => setShowSimControls((prev) => !prev)}
+          />
+        )}
       </div>
 
-      {/* Bottom Status Bar (PRD Section 6 & 29) */}
-      <StatusBar
-        isConnected={isConnected}
-        registrationMetrics={registrationMetrics}
-        featureCount={features.length}
-        boundariesCount={boundaries.length}
-        boundaryPointCount={
-          boundaries.reduce((sum, b) => sum + (b.visible !== false ? b.points.length : 0), 0) +
-          (isDrawingBoundary ? activeBoundaryPoints.length : 0)
-        }
-        isDrawingBoundary={isDrawingBoundary}
-        minInliersThreshold={regSettings.minInliers}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-      />
+      {/* Bottom Status Bar (PRD Section 6 & 29) - Hidden when in Fullscreen Mode */}
+      {!isFullscreen && (
+        <StatusBar
+          sourceType={sourceType}
+          isConnected={isConnected}
+          registrationMetrics={registrationMetrics}
+          featureCount={features.length}
+          boundariesCount={boundaries.length}
+          boundaryPointCount={
+            boundaries.reduce((sum, b) => sum + (b.visible !== false ? b.points.length : 0), 0) +
+            (isDrawingBoundary ? activeBoundaryPoints.length : 0)
+          }
+          isDrawingBoundary={isDrawingBoundary}
+          minInliersThreshold={regSettings.minInliers}
+          allLayersVisible={overlaySettings.showAllLayers !== false}
+          onToggleAllLayers={handleToggleAllLayers}
+          onToggleFullscreen={handleToggleFullscreen}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+        />
+      )}
 
       {/* Modals */}
       <AddFeatureModal
@@ -735,6 +990,8 @@ export default function App() {
         onSelectFeatureForPlacement={handleSelectFeatureForPlacement}
         existingCountByType={existingCountByType}
         plottedFeatures={features}
+        onToggleFeatureVisibility={handleToggleFeatureVisibility}
+        onToggleAllFeatures={handleToggleAllFeatures}
         onDeleteFeature={(id) => {
           setFeatures((prev) => prev.filter((f) => f.id !== id));
           if (selectedFeatureId === id) setSelectedFeatureId(null);
@@ -755,6 +1012,7 @@ export default function App() {
         onUpdateBoundary={handleUpdateBoundary}
         onDeleteBoundary={handleDeleteBoundary}
         onToggleBoundaryVisibility={handleToggleBoundaryVisibility}
+        onToggleAllBoundaries={handleToggleAllBoundaries}
         onStartDrawingBoundary={handleStartDrawingBoundary}
         onClearBoundaryPoints={handleClearBoundaryPoints}
         isDrawing={isDrawingBoundary}
@@ -781,6 +1039,26 @@ export default function App() {
         overlaySettings={overlaySettings}
         onUpdateOverlaySettings={setOverlaySettings}
         onSetCurrentAsReference={captureAndSetReference}
+        sourceType={sourceType}
+        onChangeSourceType={(type) => {
+          setSourceType(type);
+          if (type === 'rear_camera') {
+            setCameraFacingMode('environment');
+            setSelectedCameraDeviceId(null);
+          } else if (type === 'webcam') {
+            setCameraFacingMode('user');
+            setSelectedCameraDeviceId(null);
+          }
+          setTimeout(() => captureAndSetReference(), 200);
+        }}
+        cameraFacingMode={cameraFacingMode}
+        onChangeFacingMode={setCameraFacingMode}
+        availableCameras={availableCameras}
+        selectedCameraDeviceId={selectedCameraDeviceId}
+        onSelectCameraDevice={setSelectedCameraDeviceId}
+        isTorchOn={isTorchOn}
+        hasTorchSupport={hasTorchSupport}
+        onToggleTorch={handleToggleTorch}
       />
     </div>
   );

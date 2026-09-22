@@ -73,21 +73,29 @@ export interface RegistrationMetrics {
   translationEstimate: [number, number];
 }
 
+export type VideoSourceType = 'simulator' | 'rear_camera' | 'webcam' | 'rtsp';
+
 export interface CameraConfig {
-  sourceType: 'simulator' | 'webcam' | 'rtsp';
+  sourceType: VideoSourceType;
+  facingMode?: 'environment' | 'user';
+  deviceId?: string;
   rtspUrl: string;
   resolution: [number, number];
   fps: number;
   bufferSize: number;
   reconnectIntervalSec: number;
+  torchEnabled?: boolean;
 }
 
 export interface RegistrationSettings {
   enabled: boolean;
   maxFeatures: number;
-  matchRatioThreshold: number; // Lowe's ratio e.g. 0.75
-  ransacThresholdPx: number; // e.g. 4.0 px
-  minInliers: number; // e.g. 8
+  matchRatioThreshold: number; // Lowe's ratio e.g. 0.70-0.85
+  ransacThresholdPx: number; // Reprojection distance e.g. 2.0-8.0 px
+  minInliers: number; // Inliers threshold for GOOD state e.g. 6-25
+  ransacIterations?: number; // RANSAC trials e.g. 80-350
+  smoothingFactor?: number; // Temporal filter alpha (0.1 = heavy filter/stable, 0.9 = high responsive)
+  leastSquaresRefine?: boolean; // Refine homography over all inliers
   adaptiveReference: boolean;
   updateIntervalMs: number;
 }
@@ -97,6 +105,7 @@ export interface OverlaySettings {
   textSize: number;
   opacity: number;
   boundaryThickness: number;
+  showAllLayers?: boolean; // Master switch: when false, suppresses all AR tactical overlays at once
   showLabels: boolean;
   showSymbols: boolean;
   showBoundary: boolean;
