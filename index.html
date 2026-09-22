@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VAAS - Vijay Ashish Augmentation System</title>
+    <meta name="description" content="VAAS (Vijay Ashish Augmentation System) - Single-screen military exercise visualization and simulated target annotation system with computer-vision visual registration, homography estimation, overlay reprojection, and scenario management." />
+    <meta property="og:title" content="VAAS - Vijay Ashish Augmentation System" />
+    <meta property="og:description" content="VAAS (Vijay Ashish Augmentation System) - Single-screen military exercise visualization and simulated target annotation system with computer-vision visual registration, homography estimation, overlay reprojection, and scenario management." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Ensure fetch on window and Window.prototype has a setter to prevent
+      // "Cannot set property fetch of #<Window> which has only a getter"
+      (function() {
+        try {
+          var _origFetch = typeof window !== 'undefined' && window.fetch ? window.fetch.bind(window) : undefined;
+          var _fetchImpl = _origFetch;
+          var desc = {
+            get: function() {
+              return _fetchImpl;
+            },
+            set: function(fn) {
+              _fetchImpl = fn;
+            },
+            configurable: true,
+            enumerable: true
+          };
+
+          if (typeof Window !== 'undefined' && Window.prototype) {
+            try {
+              Object.defineProperty(Window.prototype, 'fetch', desc);
+            } catch (e1) {}
+          }
+
+          if (typeof window !== 'undefined') {
+            try {
+              Object.defineProperty(window, 'fetch', desc);
+            } catch (e2) {}
+          }
+        } catch (err) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

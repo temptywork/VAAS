@@ -1,0 +1,6 @@
+{
+  "name": "VAAS- vijay ashish augmentation system",
+  "description": "Single-screen military exercise visualization and simulated target annotation system with computer-vision visual registration, homography estimation, overlay reprojection, and scenario management.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
