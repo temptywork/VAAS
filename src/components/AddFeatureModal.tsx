@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FeatureType, ExerciseFeature } from '../types';
 import { FEATURE_LIBRARY } from '../data/featureDefinitions';
+import { DEFAULT_TACTICAL_SVGS, TacticalSvgPreset, colorizeTacticalSvg } from '../data/tacticalSvgPresets';
 import {
   Crosshair,
   Check,
@@ -16,6 +17,7 @@ import {
   EyeOff,
   ListFilter,
   AlertCircle,
+  Palette,
 } from 'lucide-react';
 
 export interface CustomPlacementOptions {
@@ -40,49 +42,21 @@ interface AddFeatureModalProps {
   onToggleAllFeatures?: (visible: boolean) => void;
   onDeleteFeature?: (id: string) => void;
   onDeleteAllFeatures?: () => void;
+  onUpdateFeatureColor?: (id: string, color: string) => void;
 }
 
-const PRESET_SAMPLE_SVGS = [
-  {
-    name: 'Tactical UAV / Drone',
-    label: 'SIM UAV 01',
-    color: '#38bdf8',
-    dataUrl:
-      'data:image/svg+xml;utf8,' +
-      encodeURIComponent(
-        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none" stroke="#38bdf8" stroke-width="5" stroke-linecap="round"><path d="M50 15 L50 85 M15 50 L85 50 M25 25 L75 75 M25 75 L75 25"/><circle cx="50" cy="50" r="14" fill="#0f172a" stroke="#38bdf8" stroke-width="5"/><circle cx="20" cy="20" r="10" stroke="#38bdf8"/><circle cx="80" cy="20" r="10" stroke="#38bdf8"/><circle cx="20" cy="80" r="10" stroke="#38bdf8"/><circle cx="80" cy="80" r="10" stroke="#38bdf8"/></svg>`
-      ),
-  },
-  {
-    name: 'Radar Emplacement',
-    label: 'RADAR SITE 01',
-    color: '#f59e0b',
-    dataUrl:
-      'data:image/svg+xml;utf8,' +
-      encodeURIComponent(
-        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"><path d="M20 70 A45 45 0 0 1 80 70 M32 60 A30 30 0 0 1 68 60 M44 50 A15 15 0 0 1 56 50"/><circle cx="50" cy="50" r="5" fill="#f59e0b"/><line x1="50" y1="50" x2="70" y2="30"/><line x1="50" y1="70" x2="50" y2="90"/><line x1="35" y1="90" x2="65" y2="90"/></svg>`
-      ),
-  },
-  {
-    name: 'Air Defense Battery',
-    label: 'AIR DEF 01',
-    color: '#ef4444',
-    dataUrl:
-      'data:image/svg+xml;utf8,' +
-      encodeURIComponent(
-        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none" stroke="#ef4444" stroke-width="5" stroke-linecap="round"><line x1="20" y1="85" x2="80" y2="85"/><rect x="30" y="65" width="40" height="20" fill="#0f172a"/><line x1="50" y1="65" x2="50" y2="20"/><polygon points="50,10 40,28 60,28" fill="#ef4444"/><line x1="35" y1="65" x2="25" y2="30"/><polygon points="25,20 18,36 32,36" fill="#ef4444"/><line x1="65" y1="65" x2="75" y2="30"/><polygon points="75,20 68,36 82,36" fill="#ef4444"/></svg>`
-      ),
-  },
-  {
-    name: 'Medical Aid Station',
-    label: 'MEDEVAC OP',
-    color: '#22c55e',
-    dataUrl:
-      'data:image/svg+xml;utf8,' +
-      encodeURIComponent(
-        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none" stroke="#22c55e" stroke-width="5"><rect x="15" y="15" width="70" height="70" rx="12" fill="#0f172a"/><path d="M50 28 L50 72 M28 50 L72 50" stroke="#22c55e" stroke-width="12" stroke-linecap="square"/></svg>`
-      ),
-  },
+const COLOR_PALETTE = [
+  { label: 'Red (Hostile/OPFOR)', color: '#ef4444' },
+  { label: 'Amber (Caution/Warning)', color: '#f59e0b' },
+  { label: 'Yellow (Support/Logistics)', color: '#eab308' },
+  { label: 'Green (Friendly/Infantry)', color: '#10b981' },
+  { label: 'Emerald (Medical/Status)', color: '#22c55e' },
+  { label: 'Cyan (Recon/Observation)', color: '#06b6d4' },
+  { label: 'Sky (Tactical AR/Air)', color: '#38bdf8' },
+  { label: 'Blue (Command/Comm)', color: '#3b82f6' },
+  { label: 'Purple (Headquarters/HQ)', color: '#a855f7' },
+  { label: 'Pink (Artillery/Fire)', color: '#ec4899' },
+  { label: 'White (Neutral/Mark)', color: '#f8fafc' },
 ];
 
 export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
@@ -95,13 +69,15 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
   onToggleAllFeatures,
   onDeleteFeature,
   onDeleteAllFeatures,
+  onUpdateFeatureColor,
 }) => {
   const [activeTab, setActiveTab] = useState<'standard' | 'custom' | 'plotted'>('standard');
   const [selectedType, setSelectedType] = useState<FeatureType>('tank');
   const [label, setLabel] = useState<string>('');
   const [rotation, setRotation] = useState<number>(0);
   const [scale, setScale] = useState<number>(1.0);
-  const [customColor, setCustomColor] = useState<string>('#38bdf8');
+  const [featureColor, setFeatureColor] = useState<string>('#ef4444');
+  const [selectedPresetId, setSelectedPresetId] = useState<string>('preset_tank');
   const [plottedSearch, setPlottedSearch] = useState<string>('');
   const [confirmDeleteAll, setConfirmDeleteAll] = useState<boolean>(false);
 
@@ -119,10 +95,22 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  if (!isOpen) return null;
-
   const currentDef = FEATURE_LIBRARY[selectedType];
   const allFeaturesVisible = plottedFeatures.length > 0 && plottedFeatures.every((f) => f.visible !== false);
+
+  // Initialize custom preset on first mount
+  useEffect(() => {
+    if (!customImageDataUrl && DEFAULT_TACTICAL_SVGS.length > 0) {
+      const initialPreset = DEFAULT_TACTICAL_SVGS[0];
+      setCustomImageDataUrl(initialPreset.dataUrl);
+      setCustomImageType('svg');
+      setCustomImageFileName(initialPreset.name + '.svg');
+      setFeatureColor(initialPreset.defaultColor);
+      setSelectedPresetId(initialPreset.id);
+    }
+  }, [customImageDataUrl]);
+
+  if (!isOpen) return null;
 
   const filteredPlotted = plottedFeatures.filter((f) => {
     if (!plottedSearch.trim()) return true;
@@ -140,6 +128,7 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
     const prefix = def.defaultLabel.replace(/\s\d+$/, '');
     const numStr = count < 10 ? `0${count}` : `${count}`;
     setLabel(`${prefix} ${numStr}`);
+    setFeatureColor(def.color);
   };
 
   const handleProcessFile = (file: File) => {
@@ -149,6 +138,7 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
 
     setCustomImageType(isSvg ? 'svg' : isJpg ? 'jpg' : isPng ? 'png' : 'other');
     setCustomImageFileName(file.name);
+    setSelectedPresetId('uploaded');
 
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -176,27 +166,34 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
     }
   };
 
-  const handleSelectPresetSvg = (preset: typeof PRESET_SAMPLE_SVGS[0]) => {
+  const handleSelectPresetSvg = (preset: TacticalSvgPreset) => {
+    setSelectedPresetId(preset.id);
     setCustomImageDataUrl(preset.dataUrl);
     setCustomImageType('svg');
     setCustomImageFileName(preset.name + '.svg');
-    setCustomColor(preset.color);
+    setFeatureColor(preset.defaultColor);
     setLabel(preset.label);
   };
 
   const handleConfirmPlacement = () => {
     if (activeTab === 'custom') {
       const finalLabel = label.trim() || 'CUSTOM MARK';
+      let finalCustomImage = customImageDataUrl || DEFAULT_TACTICAL_SVGS[0].dataUrl;
+      const matchedPreset = DEFAULT_TACTICAL_SVGS.find((p) => p.id === selectedPresetId);
+      if (matchedPreset && featureColor) {
+        finalCustomImage = colorizeTacticalSvg(matchedPreset.svgRaw, featureColor);
+      }
       onSelectFeatureForPlacement('custom', finalLabel, rotation, {
-        customImage: customImageDataUrl || PRESET_SAMPLE_SVGS[0].dataUrl,
+        customImage: finalCustomImage,
         customImageType: customImageType,
         scale,
-        color: customColor,
+        color: featureColor,
       });
     } else {
       const finalLabel = label.trim() || currentDef.defaultLabel;
       onSelectFeatureForPlacement(selectedType, finalLabel, rotation, {
         scale,
+        color: featureColor,
       });
     }
     onClose();
@@ -245,8 +242,8 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
             type="button"
             onClick={() => {
               setActiveTab('custom');
-              if (!customImageDataUrl) {
-                handleSelectPresetSvg(PRESET_SAMPLE_SVGS[0]);
+              if (!customImageDataUrl && DEFAULT_TACTICAL_SVGS.length > 0) {
+                handleSelectPresetSvg(DEFAULT_TACTICAL_SVGS[0]);
               }
             }}
             className={`flex-1 py-2.5 px-3 font-mono text-[11px] font-semibold flex items-center justify-center gap-1.5 border-b-2 transition ${
@@ -256,7 +253,7 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
             }`}
           >
             <ImageIcon className="w-3.5 h-3.5" />
-            <span>Custom Symbol</span>
+            <span>Custom Symbol & Presets</span>
           </button>
           <button
             type="button"
@@ -293,6 +290,7 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
                   .map((type) => {
                     const item = FEATURE_LIBRARY[type];
                     const isSelected = selectedType === type;
+                    const displayColor = isSelected ? featureColor : item.color;
                     return (
                       <button
                         key={type}
@@ -305,11 +303,11 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
                         }`}
                       >
                         <span
-                          className="w-7 h-7 rounded flex items-center justify-center font-bold text-base shadow-sm shrink-0"
+                          className="w-7 h-7 rounded flex items-center justify-center font-bold text-base shadow-sm shrink-0 transition-colors"
                           style={{
-                            backgroundColor: `${item.color}22`,
-                            color: item.color,
-                            border: `1px solid ${item.color}66`,
+                            backgroundColor: `${displayColor}22`,
+                            color: displayColor,
+                            border: `1px solid ${displayColor}66`,
                           }}
                         >
                           {item.symbol}
@@ -386,70 +384,55 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
                   )}
                 </div>
 
-                {/* Quick Preset SVG Samples */}
+                {/* Default Tactical SVGs Grid (Tank, Infantry, Comm Tower, Artillery Gun, etc.) */}
                 <div>
-                  <div className="text-[10px] text-slate-400 font-mono uppercase tracking-wider mb-1.5 flex items-center gap-1">
-                    <Sparkles className="w-3 h-3 text-amber-400" />
-                    <span>Quick Tactical Presets (SVG)</span>
+                  <div className="text-[11px] text-slate-300 font-mono font-semibold uppercase tracking-wider mb-2 flex items-center justify-between">
+                    <span className="flex items-center gap-1.5 text-sky-400">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                      Default Tactical SVGs ({DEFAULT_TACTICAL_SVGS.length})
+                    </span>
+                    <span className="text-[10px] text-slate-400 normal-case">
+                      Tank, Infantry, Comm Tower, Artillery Gun
+                    </span>
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    {PRESET_SAMPLE_SVGS.map((preset) => {
-                      const isSelected =
-                        customImageDataUrl === preset.dataUrl ||
-                        customImageFileName === preset.name + '.svg';
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {DEFAULT_TACTICAL_SVGS.map((preset) => {
+                      const isSelected = selectedPresetId === preset.id;
                       return (
                         <button
-                          key={preset.name}
+                          key={preset.id}
                           type="button"
                           onClick={() => handleSelectPresetSvg(preset)}
-                          className={`flex items-center gap-2 p-2 rounded-lg border text-left transition ${
+                          className={`flex items-center gap-2 p-2 rounded-lg border text-left transition group ${
                             isSelected
-                              ? 'bg-sky-950/70 border-sky-500 text-sky-200'
-                              : 'bg-slate-800/40 border-slate-700/80 text-slate-300 hover:bg-slate-800'
+                              ? 'bg-sky-950/80 border-sky-400 text-sky-200 ring-1 ring-sky-500/50'
+                              : 'bg-slate-800/50 border-slate-700/80 text-slate-300 hover:bg-slate-800 hover:border-slate-600'
                           }`}
                         >
-                          <div className="w-7 h-7 bg-slate-950 border border-slate-700 rounded p-0.5 shrink-0 flex items-center justify-center">
+                          <div
+                            className="w-8 h-8 rounded p-1 shrink-0 flex items-center justify-center border transition"
+                            style={{
+                              backgroundColor: 'rgba(15, 23, 42, 0.9)',
+                              borderColor: isSelected ? preset.defaultColor : 'rgba(51, 65, 85, 0.8)',
+                            }}
+                          >
                             <img
                               src={preset.dataUrl}
                               alt={preset.name}
                               className="w-full h-full object-contain"
                             />
                           </div>
-                          <span className="text-xs font-medium truncate">
-                            {preset.name}
-                          </span>
+                          <div className="min-w-0 flex-1">
+                            <span className="text-xs font-semibold block truncate group-hover:text-white">
+                              {preset.name}
+                            </span>
+                            <span className="text-[9px] font-mono text-slate-400 block truncate">
+                              {preset.category}
+                            </span>
+                          </div>
                         </button>
                       );
                     })}
-                  </div>
-                </div>
-
-                {/* Color Theme for Custom Symbol */}
-                <div>
-                  <label className="text-[11px] font-mono text-slate-400 uppercase tracking-wider block mb-1">
-                    Highlight / Badge Color
-                  </label>
-                  <div className="flex items-center gap-2">
-                    {['#38bdf8', '#ef4444', '#f59e0b', '#22c55e', '#a855f7', '#f43f5e'].map(
-                      (c) => (
-                        <button
-                          key={c}
-                          type="button"
-                          onClick={() => setCustomColor(c)}
-                          className={`w-6 h-6 rounded-full border-2 transition ${
-                            customColor === c ? 'border-white scale-110' : 'border-transparent'
-                          }`}
-                          style={{ backgroundColor: c }}
-                        />
-                      )
-                    )}
-                    <input
-                      type="color"
-                      value={customColor}
-                      onChange={(e) => setCustomColor(e.target.value)}
-                      className="w-7 h-7 rounded border border-slate-700 bg-transparent cursor-pointer ml-2"
-                      title="Custom Hex Color"
-                    />
                   </div>
                 </div>
               </div>
@@ -605,8 +588,24 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
                           </div>
                         </div>
 
-                        {/* Right: Quick Visibility Toggle & Delete Actions */}
-                        <div className="flex items-center gap-1.5 shrink-0">
+                        {/* Right: Color Changer, Quick Visibility Toggle & Delete Actions */}
+                        <div className="flex items-center gap-2 shrink-0">
+                          {/* Live Color Picker for Plotted Feature */}
+                          <div className="relative flex items-center gap-1 bg-slate-900 px-2 py-1 rounded border border-slate-700 hover:border-slate-600 transition" title="Change color of this feature">
+                            <span
+                              className="w-3.5 h-3.5 rounded-full border border-white/60 shrink-0 shadow-sm"
+                              style={{ backgroundColor: feat.color || def.color }}
+                            />
+                            <Palette className="w-3 h-3 text-slate-400 pointer-events-none" />
+                            <input
+                              type="color"
+                              value={feat.color || def.color}
+                              onChange={(e) => onUpdateFeatureColor && onUpdateFeatureColor(feat.id, e.target.value)}
+                              className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                              title="Select new color for feature"
+                            />
+                          </div>
+
                           {onToggleFeatureVisibility && (
                             <button
                               type="button"
@@ -658,6 +657,42 @@ export const AddFeatureModal: React.FC<AddFeatureModalProps> = ({
                   placeholder={activeTab === 'standard' ? currentDef.defaultLabel : 'CUSTOM MARK'}
                   className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-sky-500"
                 />
+              </div>
+
+              {/* Feature Color Palette Picker */}
+              <div>
+                <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-1.5">
+                  <span className="flex items-center gap-1">
+                    <Palette className="w-3 h-3 text-sky-400" />
+                    Feature / Symbol Color
+                  </span>
+                  <span className="text-slate-300 font-bold">{featureColor}</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {COLOR_PALETTE.map((item) => (
+                    <button
+                      key={item.color}
+                      type="button"
+                      onClick={() => setFeatureColor(item.color)}
+                      title={item.label}
+                      className={`w-6 h-6 rounded-full border-2 transition transform ${
+                        featureColor.toLowerCase() === item.color.toLowerCase()
+                          ? 'border-white scale-125 shadow-md shadow-sky-500/30'
+                          : 'border-slate-800 hover:scale-110 opacity-80 hover:opacity-100'
+                      }`}
+                      style={{ backgroundColor: item.color }}
+                    />
+                  ))}
+                  <div className="relative flex items-center ml-1">
+                    <input
+                      type="color"
+                      value={featureColor}
+                      onChange={(e) => setFeatureColor(e.target.value)}
+                      className="w-6 h-6 rounded-full border border-slate-700 bg-transparent cursor-pointer p-0 overflow-hidden"
+                      title="Custom Hex Color"
+                    />
+                  </div>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">

@@ -19,6 +19,7 @@ import {
   Maximize2,
   Trash2,
   RotateCw,
+  Palette,
 } from 'lucide-react';
 
 interface TacticalCanvasProps {
@@ -34,6 +35,7 @@ interface TacticalCanvasProps {
   isDrawingBoundary: boolean;
   pendingFeatureType: string | null;
   pendingFeatureLabel: string;
+  pendingFeatureColor?: string;
   pendingFeatureCustomImage?: string;
   onAddFeaturePoint: (refPoint: [number, number]) => void;
   onAddBoundaryPoint: (refPoint: [number, number]) => void;
@@ -59,6 +61,7 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
   isDrawingBoundary,
   pendingFeatureType,
   pendingFeatureLabel,
+  pendingFeatureColor,
   pendingFeatureCustomImage,
   onAddFeaturePoint,
   onAddBoundaryPoint,
@@ -551,7 +554,7 @@ function hexToRgba(hex: string, alpha: number) {
             const badgeY = symbolSize * 0.6 + 6;
 
             ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-            ctx.strokeStyle = def.color;
+            ctx.strokeStyle = feat.color || def.color || '#38bdf8';
             ctx.lineWidth = 1;
             ctx.beginPath();
             ctx.roundRect(-badgeW / 2, badgeY, badgeW, badgeH, 2);
@@ -593,10 +596,11 @@ function hexToRgba(hex: string, alpha: number) {
 
       // 7. Preview Cursor for pending Add Feature placement
       if (pendingFeatureType && mousePos) {
+        const previewColor = pendingFeatureColor || '#38bdf8';
         ctx.save();
         ctx.translate(mousePos.x, mousePos.y);
-        ctx.strokeStyle = 'rgba(56, 189, 248, 0.8)';
-        ctx.fillStyle = 'rgba(56, 189, 248, 0.15)';
+        ctx.strokeStyle = previewColor;
+        ctx.fillStyle = `${previewColor}25`;
         ctx.lineWidth = 1.5;
         ctx.setLineDash([4, 4]);
         ctx.beginPath();
@@ -604,7 +608,7 @@ function hexToRgba(hex: string, alpha: number) {
         ctx.fill();
         ctx.stroke();
 
-        ctx.fillStyle = '#38bdf8';
+        ctx.fillStyle = previewColor;
         ctx.font = '11px monospace';
         ctx.textAlign = 'center';
         ctx.fillText(pendingFeatureLabel || 'CLICK TO PLACE', 0, 32);
@@ -626,6 +630,7 @@ function hexToRgba(hex: string, alpha: number) {
     isDrawingBoundary,
     pendingFeatureType,
     pendingFeatureLabel,
+    pendingFeatureColor,
     selectedFeatureId,
     registrationMetrics,
     overlaySettings,
@@ -814,6 +819,37 @@ function hexToRgba(hex: string, alpha: number) {
                 }
                 className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono text-xs focus:outline-none focus:border-sky-500"
               />
+            </div>
+
+            {/* Feature Color Selector */}
+            <div>
+              <label className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">
+                Feature Color
+              </label>
+              <div className="flex items-center gap-2">
+                {['#ef4444', '#10b981', '#3b82f6', '#ec4899', '#38bdf8', '#f59e0b'].map((hex) => (
+                  <button
+                    key={hex}
+                    type="button"
+                    onClick={() => onUpdateFeature({ ...selectedFeature, color: hex })}
+                    className={`w-5 h-5 rounded-full border-2 transition ${
+                      (selectedFeature.color || '').toLowerCase() === hex.toLowerCase()
+                        ? 'border-white scale-125 shadow-sm'
+                        : 'border-transparent opacity-80 hover:opacity-100'
+                    }`}
+                    style={{ backgroundColor: hex }}
+                  />
+                ))}
+                <div className="relative flex items-center ml-1">
+                  <input
+                    type="color"
+                    value={selectedFeature.color || '#38bdf8'}
+                    onChange={(e) => onUpdateFeature({ ...selectedFeature, color: e.target.value })}
+                    className="w-5 h-5 rounded-full border border-slate-700 bg-transparent cursor-pointer p-0"
+                    title="Choose custom color"
+                  />
+                </div>
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-2">

@@ -526,6 +526,10 @@ export default function App() {
     setFeatures((prev) => prev.map((f) => ({ ...f, visible })));
   };
 
+  const handleUpdateFeatureColor = (id: string, color: string) => {
+    setFeatures((prev) => prev.map((f) => (f.id === id ? { ...f, color } : f)));
+  };
+
   // Boundary Management Handlers (Multi-boundary support)
   const handleAddBoundary = () => {
     const palette = ['#ef4444', '#f59e0b', '#38bdf8', '#22c55e', '#a855f7', '#eab308', '#ec4899'];
@@ -894,6 +898,7 @@ export default function App() {
           isDrawingBoundary={isDrawingBoundary}
           pendingFeatureType={pendingFeatureType}
           pendingFeatureLabel={pendingFeatureLabel}
+          pendingFeatureColor={pendingFeatureOptions.color}
           pendingFeatureCustomImage={pendingFeatureOptions.customImage}
           onAddFeaturePoint={handleAddFeaturePoint}
           onAddBoundaryPoint={handleAddBoundaryPoint}
@@ -992,6 +997,7 @@ export default function App() {
         plottedFeatures={features}
         onToggleFeatureVisibility={handleToggleFeatureVisibility}
         onToggleAllFeatures={handleToggleAllFeatures}
+        onUpdateFeatureColor={handleUpdateFeatureColor}
         onDeleteFeature={(id) => {
           setFeatures((prev) => prev.filter((f) => f.id !== id));
           if (selectedFeatureId === id) setSelectedFeatureId(null);
