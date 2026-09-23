@@ -14,6 +14,39 @@ export interface SimulatorCameraState {
   autoPatrol: boolean;
 }
 
+import type { VideoSourceType } from '../types';
+
+function simulatorShake(state: SimulatorCameraState): [number, number] {
+  // Deterministic for a given simulation timestamp so the displayed canvas,
+  // CV frame, and known-motion transform all describe the same camera pose.
+  return [
+    Math.sin(state.time * 0.013) * state.jitter * 6,
+    Math.sin(state.time * 0.017 + 1.2) * state.jitter * 6,
+  ];
+}
+
+/** Exact reference-to-current warp for the simulator's known PTZ motion. */
+export function getSimulatorHomography(
+  reference: SimulatorCameraState,
+  current: SimulatorCameraState
+): number[] {
+  const cx = 320;
+  const cy = 180;
+  const refShake = simulatorShake(reference);
+  const curShake = simulatorShake(current);
+  const refPanX = reference.panX - refShake[0];
+  const refPanY = reference.tiltY - refShake[1];
+  const curPanX = current.panX - curShake[0];
+  const curPanY = current.tiltY - curShake[1];
+  const scale = current.zoom / reference.zoom;
+
+  return [
+    scale, 0, cx * (1 - scale) + current.zoom * (refPanX - curPanX),
+    0, scale, cy * (1 - scale) + current.zoom * (refPanY - curPanY),
+    0, 0, 1,
+  ];
+}
+
 export class ExerciseTerrainRenderer {
   private noiseCanvas: HTMLCanvasElement | null = null;
 
@@ -54,15 +87,21 @@ export class ExerciseTerrainRenderer {
     ctx.fillRect(0, 0, width, height);
 
     // Camera jitter (shake)
-    const shakeX = (Math.random() - 0.5) * state.jitter * 12;
-    const shakeY = (Math.random() - 0.5) * state.jitter * 12;
+    // PTZ controls are expressed in the 640x360 CV reference space. Scale
+    // translations with the target canvas so the preview and CV frames depict
+    // the same camera motion at any display size.
+    const scaleX = width / 640;
+    const scaleY = height / 360;
+    const shake = simulatorShake(state);
+    const shakeX = shake[0] * scaleX;
+    const shakeY = shake[1] * scaleY;
 
     // Apply Camera Transform: Zoom from center, Pan and Tilt
     ctx.translate(width / 2, height / 2);
     ctx.scale(state.zoom, state.zoom);
     ctx.translate(
-      -width / 2 - state.panX + shakeX,
-      -height / 2 - state.tiltY + shakeY
+      -width / 2 - state.panX * scaleX + shakeX,
+      -height / 2 - state.tiltY * scaleY + shakeY
     );
 
     const W = width;
@@ -380,4 +419,36 @@ export class ExerciseTerrainRenderer {
     ctx.fill();
     ctx.restore();
   }
+}
+
+/** Draw one available source frame. All decoded sources share the same downstream CV path. */
+export function renderInputFrame(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  sourceType: VideoSourceType,
+  simState: SimulatorCameraState,
+  videoElement: HTMLVideoElement | null,
+  renderer: ExerciseTerrainRenderer
+): boolean {
+  if (sourceType === 'simulator') {
+    renderer.render(ctx, width, height, simState);
+    return true;
+  }
+  if (videoElement && videoElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    const sourceWidth = videoElement.videoWidth;
+    const sourceHeight = videoElement.videoHeight;
+    if (sourceWidth <= 0 || sourceHeight <= 0) return false;
+
+    // Contain the camera image in the target canvas. Keeping this in the shared
+    // frame path makes the preview and CV input use identical, undistorted framing.
+    ctx.fillStyle = '#090d16';
+    ctx.fillRect(0, 0, width, height);
+    const scale = Math.min(width / sourceWidth, height / sourceHeight);
+    const drawWidth = sourceWidth * scale;
+    const drawHeight = sourceHeight * scale;
+    ctx.drawImage(videoElement, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+    return true;
+  }
+  return false;
 }

@@ -11,7 +11,7 @@ import {
 import { FEATURE_LIBRARY } from '../data/featureDefinitions';
 import { projectPoint, invertHomography } from '../cv/homography';
 import { VisualRegistrationEngine } from '../cv/registrationEngine';
-import { ExerciseTerrainRenderer, SimulatorCameraState } from './ExerciseTerrainRenderer';
+import { ExerciseTerrainRenderer, renderInputFrame, SimulatorCameraState } from './ExerciseTerrainRenderer';
 import {
   AlertTriangle,
   Compass,
@@ -44,6 +44,9 @@ interface TacticalCanvasProps {
   registrationMetrics: RegistrationMetrics;
   overlaySettings: OverlaySettings;
   videoElement: HTMLVideoElement | null;
+  registrationSetup?: boolean;
+  setupActiveViewId?: string | null;
+  setupSnapshot?: string | null;
 }
 
 export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
@@ -69,6 +72,9 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
   registrationMetrics,
   overlaySettings,
   videoElement,
+  registrationSetup = false,
+  setupActiveViewId = null,
+  setupSnapshot = null,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -102,34 +108,44 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
 
       const width = canvas.width;
       const height = canvas.height;
+      const cvScale = sourceType === 'simulator' ? 1 : Math.min(width / 640, height / 360);
+      const cvWidth = sourceType === 'simulator' ? width : 640 * cvScale;
+      const cvHeight = sourceType === 'simulator' ? height : 360 * cvScale;
+      const cvLeft = (width - cvWidth) / 2;
+      const cvTop = (height - cvHeight) / 2;
+      const cvToCanvas = (x: number, y: number): [number, number] => [
+        cvLeft + (x / 640) * cvWidth,
+        cvTop + (y / 360) * cvHeight,
+      ];
 
-      // 1. Render Video Source
-      if (sourceType === 'simulator') {
-        terrainRendererRef.current.render(ctx, width, height, simState);
-      } else if ((sourceType === 'webcam' || sourceType === 'rear_camera') && videoElement && videoElement.readyState >= 2) {
-        ctx.drawImage(videoElement, 0, 0, width, height);
-      } else if (sourceType === 'webcam' || sourceType === 'rear_camera') {
-        // Connecting or waiting for camera stream
+      // Freeze the selected setup frame while placing anchors.
+      if (registrationSetup && setupSnapshot) {
+        ctx.fillStyle = '#090d16';
+        ctx.fillRect(0, 0, width, height);
+        let image = imageCacheRef.current.get(setupSnapshot);
+        if (!image) {
+          image = new Image();
+          image.src = setupSnapshot;
+          imageCacheRef.current.set(setupSnapshot, image);
+        }
+        if (image.complete && image.naturalWidth > 0) {
+          const scale = Math.min(width / image.naturalWidth, height / image.naturalHeight);
+          const drawWidth = image.naturalWidth * scale;
+          const drawHeight = image.naturalHeight * scale;
+          ctx.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+        }
+      } else if (!renderInputFrame(ctx, width, height, sourceType, simState, videoElement, terrainRendererRef.current)) {
         ctx.fillStyle = '#090d16';
         ctx.fillRect(0, 0, width, height);
         ctx.fillStyle = '#38bdf8';
         ctx.font = '13px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText(
-          sourceType === 'rear_camera'
+        const message = sourceType === 'rtsp'
+          ? 'RTSP NEEDS A BROWSER-DECODABLE RELAY (E.G. WEBRTC)'
+          : sourceType === 'rear_camera'
             ? 'CONNECTING TO MOBILE REAR CAMERA (ENVIRONMENT)...'
-            : 'CONNECTING TO WEBCAM / FRONT CAMERA...',
-          width / 2,
-          height / 2
-        );
-      } else {
-        // Fallback or connecting state for RTSP
-        ctx.fillStyle = '#090d16';
-        ctx.fillRect(0, 0, width, height);
-        ctx.fillStyle = '#38bdf8';
-        ctx.font = '14px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText('CONNECTING TO RTSP STREAM SOURCE...', width / 2, height / 2);
+            : 'CONNECTING TO WEBCAM / FRONT CAMERA...';
+        ctx.fillText(message, width / 2, height / 2);
       }
 
       // Master switch for all AR tactical overlay layers
@@ -182,10 +198,8 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
           for (let i = 0; i < inliers.length; i++) {
             const m = inliers[i];
             // Scale normalized match coords to current canvas
-            const rx = (m.refX / 640) * width;
-            const ry = (m.refY / 360) * height;
-            const cx = (m.curX / 640) * width;
-            const cy = (m.curY / 360) * height;
+            const [rx, ry] = cvToCanvas(m.refX, m.refY);
+            const [cx, cy] = cvToCanvas(m.curX, m.curY);
             ctx.moveTo(rx, ry);
             ctx.lineTo(cx, cy);
           }
@@ -196,8 +210,7 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
         const curKeypoints = engine.getCurrentKeypoints();
         for (let i = 0; i < curKeypoints.length; i++) {
           const kp = curKeypoints[i];
-          const kx = (kp.x / 640) * width;
-          const ky = (kp.y / 360) * height;
+          const [kx, ky] = cvToCanvas(kp.x, kp.y);
           ctx.fillStyle = '#38bdf8';
           ctx.fillRect(kx - 1.5, ky - 1.5, 3, 3);
         }
@@ -206,13 +219,31 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
 
       // Helper function to project a point from Reference Canvas (1280x720 baseline) to Current Screen
       const transformCoord = (refX: number, refY: number): [number, number] => {
-        if (!H) return [refX, refY];
         // Normalize ref coordinates to 640x360 CV space
         const normRefX = (refX / width) * 640;
         const normRefY = (refY / height) * 360;
-        const [projX, projY] = projectPoint(H, normRefX, normRefY);
-        // Rescale back to current canvas resolution
-        return [(projX / 640) * width, (projY / 360) * height];
+        const [projX, projY] = H ? projectPoint(H, normRefX, normRefY) : [normRefX, normRefY];
+        return cvToCanvas(projX, projY);
+      };
+
+      const matchedView = engine.getCurrentMatchedView();
+      const transformFeatureCoord = (feature: ExerciseFeature): [number, number] | null => {
+        const viewId = feature.anchorViewId || engine.getAnchorViewId();
+        if (registrationSetup) {
+          return feature.anchorViewId === setupActiveViewId && Boolean(setupSnapshot)
+            ? cvToCanvas((feature.x / width) * 640, (feature.y / height) * 360)
+            : null;
+        }
+        let featureHomography = engine.getHomography();
+        if (engine.isIndependentView(viewId)) {
+          if (matchedView.id !== viewId || !matchedView.homography) return null;
+          featureHomography = matchedView.homography;
+        } else if (matchedView.independent) {
+          return null;
+        }
+        if (!featureHomography) return null;
+        const [x, y] = projectPoint(featureHomography, (feature.x / width) * 640, (feature.y / height) * 360);
+        return cvToCanvas(x, y);
       };
 
 function hexToRgba(hex: string, alpha: number) {
@@ -227,7 +258,7 @@ function hexToRgba(hex: string, alpha: number) {
 }
 
       // 4. Draw Exercise Boundaries (Supports multiple layers, custom colors, thickness, closed areas, and labels)
-      if (overlaySettings.showBoundary && isMasterLayersVisible) {
+      if (!registrationSetup && !matchedView.independent && overlaySettings.showBoundary && isMasterLayersVisible) {
         const renderBoundaryLayer = (
           pts: BoundaryPoint[],
           color: string,
@@ -356,7 +387,9 @@ function hexToRgba(hex: string, alpha: number) {
       if (overlaySettings.showSymbols && isMasterLayersVisible) {
         features.forEach((feat) => {
           if (!feat.visible) return;
-          const [cx, cy] = transformCoord(feat.x, feat.y);
+          const point = transformFeatureCoord(feat);
+          if (!point) return;
+          const [cx, cy] = point;
           const isSelected = feat.id === selectedFeatureId;
           const def = FEATURE_LIBRARY[feat.type] || FEATURE_LIBRARY.tank;
 
@@ -569,7 +602,7 @@ function hexToRgba(hex: string, alpha: number) {
       }
 
       // 6. Registration Lost Warning Banner (Frozen Overlays per PRD Section 16 & 29)
-      if (registrationMetrics.quality === 'LOST') {
+      if (!registrationSetup && registrationMetrics.quality === 'LOST' && sourceType !== 'simulator') {
         ctx.save();
         const bannerW = 340;
         const bannerH = 42;
@@ -619,6 +652,9 @@ function hexToRgba(hex: string, alpha: number) {
   }, [
     engine,
     sourceType,
+    registrationSetup,
+    setupActiveViewId,
+    setupSnapshot,
     simState,
     features,
     boundary,
@@ -662,13 +698,28 @@ function hexToRgba(hex: string, alpha: number) {
     const rect = canvas.getBoundingClientRect();
     const screenX = e.clientX - rect.x;
     const screenY = e.clientY - rect.y;
+    const displayScale = sourceType === 'simulator' ? 1 : Math.min(canvas.width / 640, canvas.height / 360);
+    const displayWidth = sourceType === 'simulator' ? canvas.width : 640 * displayScale;
+    const displayHeight = sourceType === 'simulator' ? canvas.height : 360 * displayScale;
+    const displayLeft = (canvas.width - displayWidth) / 2;
+    const displayTop = (canvas.height - displayHeight) / 2;
+    const currentX = ((screenX - displayLeft) / displayWidth) * 640;
+    const currentY = ((screenY - displayTop) / displayHeight) * 360;
 
-    const H = engine.getHomography();
+    if (registrationSetup) {
+      if (pendingFeatureType && setupActiveViewId && setupSnapshot && currentX >= 0 && currentX <= 640 && currentY >= 0 && currentY <= 360) {
+        onAddFeaturePoint([(currentX / 640) * canvas.width, (currentY / 360) * canvas.height]);
+      }
+      return;
+    }
+
+    const currentMatch = engine.getCurrentMatchedView();
+    const H = currentMatch.independent ? currentMatch.homography : engine.getHomography();
     const invH = H ? invertHomography(H) : null;
 
     // Convert Screen (width x height) to CV 640x360 normalized coordinates
-    const normCurX = (screenX / canvas.width) * 640;
-    const normCurY = (screenY / canvas.height) * 360;
+    const normCurX = currentX;
+    const normCurY = currentY;
 
     let refCoordX = screenX;
     let refCoordY = screenY;
@@ -698,18 +749,15 @@ function hexToRgba(hex: string, alpha: number) {
       for (let i = features.length - 1; i >= 0; i--) {
         const feat = features[i];
         if (!feat.visible) continue;
-        // Project ref coordinates to current screen
-        let featScreenX = feat.x;
-        let featScreenY = feat.y;
-        if (H) {
-          const [px, py] = projectPoint(
-            H,
-            (feat.x / canvas.width) * 640,
-            (feat.y / canvas.height) * 360
-          );
-          featScreenX = (px / 640) * canvas.width;
-          featScreenY = (py / 360) * canvas.height;
-        }
+        const viewId = feat.anchorViewId || engine.getAnchorViewId();
+        const independent = engine.isIndependentView(viewId);
+        if (independent && viewId !== currentMatch.id) continue;
+        if (!independent && currentMatch.independent) continue;
+        const featureHomography = independent ? currentMatch.homography : engine.getHomography();
+        if (!featureHomography) continue;
+        const [px, py] = projectPoint(featureHomography, (feat.x / canvas.width) * 640, (feat.y / canvas.height) * 360);
+        const featScreenX = displayLeft + (px / 640) * displayWidth;
+        const featScreenY = displayTop + (py / 360) * displayHeight;
         const dist = Math.hypot(screenX - featScreenX, screenY - featScreenY);
         if (dist <= 24) {
           clickedFeature = feat;
@@ -728,24 +776,35 @@ function hexToRgba(hex: string, alpha: number) {
     const x = e.clientX - rect.x;
     const y = e.clientY - rect.y;
     setMousePos({ x, y });
+    const displayScale = sourceType === 'simulator' ? 1 : Math.min(canvas.width / 640, canvas.height / 360);
+    const displayWidth = sourceType === 'simulator' ? canvas.width : 640 * displayScale;
+    const displayHeight = sourceType === 'simulator' ? canvas.height : 360 * displayScale;
+    const displayLeft = (canvas.width - displayWidth) / 2;
+    const displayTop = (canvas.height - displayHeight) / 2;
 
     // Check hover
     let isNear = false;
     const isMasterVisible = overlaySettings.showAllLayers !== false && overlaySettings.showSymbols !== false;
     if (isMasterVisible) {
-      const H = engine.getHomography();
-      for (const feat of features) {
-        if (!feat.visible) continue;
-        let fx = feat.x;
-        let fy = feat.y;
-        if (H) {
-          const [px, py] = projectPoint(
-            H,
+        const currentMatch = engine.getCurrentMatchedView();
+        for (const feat of features) {
+          if (!feat.visible) continue;
+          const viewId = feat.anchorViewId || engine.getAnchorViewId();
+          const independent = engine.isIndependentView(viewId);
+          if (independent && viewId !== currentMatch.id) continue;
+          if (!independent && currentMatch.independent) continue;
+          const featureHomography = independent ? currentMatch.homography : engine.getHomography();
+          if (!featureHomography) continue;
+          let fx = feat.x;
+          let fy = feat.y;
+          {
+            const [px, py] = projectPoint(
+              featureHomography,
             (feat.x / canvas.width) * 640,
             (feat.y / canvas.height) * 360
           );
-          fx = (px / 640) * canvas.width;
-          fy = (py / 360) * canvas.height;
+          fx = displayLeft + (px / 640) * displayWidth;
+          fy = displayTop + (py / 360) * displayHeight;
         }
         if (Math.hypot(x - fx, y - fy) <= 24) {
           isNear = true;

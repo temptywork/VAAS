@@ -161,7 +161,8 @@ export function estimateHomographyRANSAC(
   matches: FeatureMatch[],
   maxIterations = 120,
   ransacThresholdPx = 4.5,
-  minInliers = 8
+  minInliers = 8,
+  leastSquaresRefine = true
 ): RansacResult {
   const result: RansacResult = {
     homography: null,
@@ -241,7 +242,7 @@ export function estimateHomographyRANSAC(
     // Refine homography using all inliers via normalized linear least squares / SVD approximation
     // This dramatically stabilizes tracking and eliminates single-sample jitter.
     let refinedH = bestH;
-    if (bestInliers.length >= 6) {
+    if (leastSquaresRefine && bestInliers.length >= 6) {
       const refined = refineHomographyLeastSquares(bestInliers, bestH);
       if (refined) {
         refinedH = refined;

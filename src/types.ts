@@ -33,6 +33,8 @@ export interface ExerciseFeature {
   customImage?: string; // Base64 data URL for SVG / JPG / PNG custom symbol
   customImageType?: 'svg' | 'jpg' | 'png' | 'other';
   createdAt: number;
+  /** Camera view in which this anchor point was placed during registration setup. */
+  anchorViewId?: string;
 }
 
 export type BoundaryPoint = [number, number]; // [x, y] in reference frame
@@ -90,10 +92,12 @@ export interface CameraConfig {
 export interface RegistrationSettings {
   enabled: boolean;
   maxFeatures: number;
+  fastThreshold?: number; // Lower values detect more FAST corners
   matchRatioThreshold: number; // Lowe's ratio e.g. 0.70-0.85
   ransacThresholdPx: number; // Reprojection distance e.g. 2.0-8.0 px
   minInliers: number; // Inliers threshold for GOOD state e.g. 6-25
   ransacIterations?: number; // RANSAC trials e.g. 80-350
+  lostFrameToleranceFrames?: number; // Brief weak-match grace before LOST
   smoothingFactor?: number; // Temporal filter alpha (0.1 = heavy filter/stable, 0.9 = high responsive)
   leastSquaresRefine?: boolean; // Refine homography over all inliers
   adaptiveReference: boolean;
@@ -135,6 +139,7 @@ export interface ScenarioData {
     color?: string;
     customImage?: string;
     customImageType?: 'svg' | 'jpg' | 'png' | 'other';
+    anchorViewId?: string;
   }>;
   boundary?: BoundaryPoint[];
   boundary_config?: BoundaryConfig;
@@ -145,4 +150,5 @@ export interface ScenarioData {
     min_inliers: number;
   };
   reference_image?: string; // base64 data URL
+  reference_views?: Array<{ id: string; image: string }>;
 }

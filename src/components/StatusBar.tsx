@@ -47,6 +47,15 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   const { quality, inliers, totalMatches, fps, processingTimeMs } = registrationMetrics;
 
   const getQualityBadge = () => {
+    if (sourceType === 'simulator') {
+      return (
+        <span className="flex items-center gap-1 text-emerald-400 bg-emerald-950/80 border border-emerald-500/40 px-2 py-0.5 rounded font-mono font-semibold">
+          <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+          <span>SIM PTZ: KNOWN</span>
+        </span>
+      );
+    }
+
     switch (quality) {
       case 'GOOD':
         return (
@@ -132,7 +141,8 @@ export const StatusBar: React.FC<StatusBarProps> = ({
         <div className="flex items-center gap-2">
           {getQualityBadge()}
           <span className="text-[11px] text-slate-400">
-            Inliers: <strong className="text-slate-200">{inliers}</strong> / {minInliersThreshold}
+            {sourceType === 'simulator' ? 'CV inliers:' : 'Inliers:'}{' '}
+            <strong className="text-slate-200">{inliers}</strong> / {minInliersThreshold}
           </span>
           <span className="text-[10px] text-slate-500 hidden sm:inline">
             (Matches: {totalMatches})

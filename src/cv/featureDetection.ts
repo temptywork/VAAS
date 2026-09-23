@@ -13,7 +13,7 @@ const CIRCLE_OFFSETS: [number, number][] = [
   [0, -3],  [1, -3],  [2, -2],  [3, -1],
   [3, 0],   [3, 1],   [2, 2],   [1, 3],
   [0, 3],   [-1, 3],  [-2, 2],  [-3, 1],
-  [-3, 0],  [-1, -3], [-2, -2], [-1, -3]
+  [-3, 0],  [-3, -1], [-2, -2], [-1, -3]
 ];
 
 // Fixed pseudo-random Gaussian-distributed sampling pattern for 128-bit BRIEF-style descriptor

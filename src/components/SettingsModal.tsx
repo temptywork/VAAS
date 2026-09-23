@@ -165,6 +165,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="space-y-3 bg-slate-950/40 p-3 rounded-lg border border-slate-800/80">
                 <div>
                   <div className="flex justify-between text-[11px] font-mono mb-1">
+                    <span className="text-slate-400">FAST Corner Sensitivity</span>
+                    <span className="text-sky-400 font-bold">{regSettings.fastThreshold ?? 16}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="8"
+                    max="32"
+                    step="2"
+                    value={regSettings.fastThreshold ?? 16}
+                    onChange={(e) => onUpdateRegSettings({
+                      ...regSettings,
+                      fastThreshold: parseInt(e.target.value),
+                    })}
+                    className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
+                  />
+                  <span className="text-[10px] text-slate-500 block mt-0.5">
+                    Lower values find more corners in low-contrast terrain; RANSAC rejects false matches.
+                  </span>
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-[11px] font-mono mb-1">
                     <span className="text-slate-400">Feature Count (Max Features)</span>
                     <span className="text-sky-400 font-bold">{regSettings.maxFeatures}</span>
                   </div>
@@ -183,7 +205,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
                   />
                   <span className="text-[10px] text-slate-500 block mt-0.5">
-                    Controls number of FAST/ORB keypoints extracted across spatial bins.
+                    Controls the maximum number of FAST/BRIEF keypoints sampled across spatial bins.
                   </span>
                 </div>
 
@@ -209,7 +231,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
                   />
                   <span className="text-[10px] text-slate-500 block mt-0.5">
-                    Ratio test distance(best) &lt; ratio × distance(second_best). Initial 0.70–0.75.
+                    Ratio test distance(best) &lt; ratio × distance(second best). Higher values retain more candidates; RANSAC checks geometry.
                   </span>
                 </div>
 
@@ -263,14 +285,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div>
                   <div className="flex justify-between text-[11px] font-mono mb-1">
                     <span className="text-slate-400">RANSAC Iteration Trials</span>
-                    <span className="text-emerald-400 font-bold">{regSettings.ransacIterations ?? 160} cycles</span>
+                    <span className="text-emerald-400 font-bold">{regSettings.ransacIterations ?? 300} cycles</span>
                   </div>
                   <input
                     type="range"
                     min="60"
                     max="320"
                     step="20"
-                    value={regSettings.ransacIterations ?? 160}
+                    value={regSettings.ransacIterations ?? 300}
                     onChange={(e) =>
                       onUpdateRegSettings({
                         ...regSettings,
@@ -286,15 +308,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                 <div>
                   <div className="flex justify-between text-[11px] font-mono mb-1">
+                    <span className="text-slate-400">Weak-Frame Recovery Grace</span>
+                    <span className="text-emerald-400 font-bold">
+                      {regSettings.lostFrameToleranceFrames ?? 12} frames
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="30"
+                    step="2"
+                    value={regSettings.lostFrameToleranceFrames ?? 12}
+                    onChange={(e) => onUpdateRegSettings({
+                      ...regSettings,
+                      lostFrameToleranceFrames: parseInt(e.target.value),
+                    })}
+                    className="w-full accent-emerald-400 h-1.5 bg-slate-800 rounded"
+                  />
+                  <span className="text-[10px] text-slate-500 block mt-0.5">
+                    Holds the last trusted pose through brief dropouts (12 frames is about 0.4 s at 30 FPS).
+                  </span>
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-[11px] font-mono mb-1">
                     <span className="text-slate-400">Temporal Smoothing Responsiveness (α)</span>
-                    <span className="text-emerald-400 font-bold">{((regSettings.smoothingFactor ?? 0.65) * 100).toFixed(0)}%</span>
+                    <span className="text-emerald-400 font-bold">{((regSettings.smoothingFactor ?? 0.5) * 100).toFixed(0)}%</span>
                   </div>
                   <input
                     type="range"
                     min="0.20"
                     max="0.95"
                     step="0.05"
-                    value={regSettings.smoothingFactor ?? 0.65}
+                    value={regSettings.smoothingFactor ?? 0.5}
                     onChange={(e) =>
                       onUpdateRegSettings({
                         ...regSettings,

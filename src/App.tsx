@@ -24,7 +24,12 @@ import { SettingsModal } from './components/SettingsModal';
 import { ExerciseSimulatorControls } from './components/ExerciseSimulatorControls';
 import { DiagnosticsDrawer } from './components/DiagnosticsDrawer';
 import { DEFAULT_SCENARIOS } from './data/defaultScenarios';
-import { ExerciseTerrainRenderer, SimulatorCameraState } from './components/ExerciseTerrainRenderer';
+import {
+  ExerciseTerrainRenderer,
+  getSimulatorHomography,
+  renderInputFrame,
+  SimulatorCameraState,
+} from './components/ExerciseTerrainRenderer';
 import { FEATURE_LIBRARY } from './data/featureDefinitions';
 
 export default function App() {
@@ -36,8 +41,8 @@ export default function App() {
   const activeStreamRef = useRef<MediaStream | null>(null);
 
   // Camera & Stream State
-  const [sourceType, setSourceType] = useState<VideoSourceType>('simulator');
-  const [cameraFacingMode, setCameraFacingMode] = useState<'environment' | 'user'>('environment');
+  const [sourceType, setSourceType] = useState<VideoSourceType>('webcam');
+  const [cameraFacingMode, setCameraFacingMode] = useState<'environment' | 'user'>('user');
   const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
   const [selectedCameraDeviceId, setSelectedCameraDeviceId] = useState<string | null>(null);
   const [isTorchOn, setIsTorchOn] = useState<boolean>(false);
@@ -45,6 +50,10 @@ export default function App() {
   const [rtspUrl, setRtspUrl] = useState<string>('rtsp://exercise-control:sec88@192.168.1.100:554/live');
   const [isConnected, setIsConnected] = useState<boolean>(true);
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
+  const [registrationSetup, setRegistrationSetup] = useState(true);
+  const [setupViews, setSetupViews] = useState<Array<{ id: string; image: string }>>([]);
+  const [setupActiveViewId, setSetupActiveViewId] = useState<string | null>(null);
+  const [setupSnapshot, setSetupSnapshot] = useState<string | null>(null);
 
   // Simulator Camera PTZ State
   const [simState, setSimState] = useState<SimulatorCameraState>({
@@ -56,6 +65,11 @@ export default function App() {
     flirThermal: false,
     autoPatrol: false,
   });
+  // Keep async frame callbacks on the newest PTZ state without rebuilding
+  // their timers on every simulator tick.
+  const simStateRef = useRef(simState);
+  simStateRef.current = simState;
+  const simulatorReferenceStateRef = useRef<SimulatorCameraState | null>(null);
 
   // Exercise Overlay Features & Boundaries (Loaded with Exercise Crimson Shield initial setup)
   const [scenarioName, setScenarioName] = useState<string>(DEFAULT_SCENARIOS[0].scenario_name);
@@ -132,7 +146,7 @@ export default function App() {
   });
 
   const [cameraConfig, setCameraConfig] = useState<CameraConfig>({
-    sourceType: 'simulator',
+    sourceType: 'webcam',
     rtspUrl: 'rtsp://exercise-control:sec88@192.168.1.100:554/live',
     resolution: [1280, 720],
     fps: 30,
@@ -142,12 +156,14 @@ export default function App() {
 
   const [regSettings, setRegSettings] = useState<RegistrationSettings>({
     enabled: true,
-    maxFeatures: 260,
-    matchRatioThreshold: 0.74,
+    maxFeatures: 360,
+    fastThreshold: 16,
+    matchRatioThreshold: 0.78,
     ransacThresholdPx: 4.5,
     minInliers: 8,
-    ransacIterations: 160,
-    smoothingFactor: 0.65,
+    ransacIterations: 300,
+    lostFrameToleranceFrames: 12,
+    smoothingFactor: 0.5,
     leastSquaresRefine: true,
     adaptiveReference: false,
     updateIntervalMs: 33,
@@ -334,6 +350,7 @@ export default function App() {
               console.warn('Camera fallback stream error:', fallbackErr);
               alert('Unable to access camera device. Switching back to Exercise Feed Simulator.');
               setSourceType('simulator');
+              setRegistrationSetup(false);
             });
         });
     } else {
@@ -392,41 +409,84 @@ export default function App() {
 
   // Set initial Reference Frame once canvas is mounted
   const captureAndSetReference = useCallback(() => {
+    if (registrationSetup) return;
     const cvCanvas = cvCanvasRef.current;
     if (!cvCanvas) return;
     const ctx = cvCanvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
 
+    const referenceState = { ...simStateRef.current };
     if (sourceType === 'simulator') {
-      cvTerrainRendererRef.current.render(ctx, 640, 360, simState);
-    } else if (
-      (sourceType === 'webcam' || sourceType === 'rear_camera') &&
-      videoElementRef.current &&
-      videoElementRef.current.readyState >= 2
-    ) {
-      ctx.drawImage(videoElementRef.current, 0, 0, 640, 360);
+      simulatorReferenceStateRef.current = referenceState;
     } else {
-      // Fallback synthetic texture
-      ctx.fillStyle = '#1e293b';
-      ctx.fillRect(0, 0, 640, 360);
+      simulatorReferenceStateRef.current = null;
     }
+    engineRef.current.setExternalHomography(null);
+    if (!renderInputFrame(ctx, 640, 360, sourceType, referenceState, videoElementRef.current, cvTerrainRendererRef.current)) return;
 
     const imgData = ctx.getImageData(0, 0, 640, 360);
     const dataUrl = cvCanvas.toDataURL('image/jpeg', 0.85);
     const { keypointCount } = engineRef.current.setReferenceFrame(imgData, dataUrl);
+    if (sourceType === 'simulator') {
+      engineRef.current.setExternalHomography([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    }
     console.log(`Reference frame established with ${keypointCount} features.`);
-  }, [sourceType, simState]);
+  }, [sourceType, registrationSetup]);
 
   // Establish initial reference frame on mount / connection
   useEffect(() => {
-    if (isConnected) {
+    if (isConnected && !registrationSetup && setupViews.length === 0) {
       // Brief delay to allow canvases/video elements to initialize
       const timer = setTimeout(() => {
         captureAndSetReference();
       }, 200);
       return () => clearTimeout(timer);
     }
-  }, [isConnected, captureAndSetReference]);
+  }, [isConnected, registrationSetup, setupViews.length, captureAndSetReference]);
+
+  // The camera permission prompt and stream startup can take longer than the
+  // initial reference delay. Capture once the first decoded webcam frame exists.
+  useEffect(() => {
+    if (!registrationSetup && setupViews.length === 0 && isConnected && (sourceType === 'webcam' || sourceType === 'rear_camera') && videoElement?.readyState && videoElement.readyState >= 2) {
+      captureAndSetReference();
+    }
+  }, [registrationSetup, setupViews.length, isConnected, sourceType, videoElement, captureAndSetReference]);
+
+  const captureSetupView = useCallback(() => {
+    if (setupSnapshot) return;
+    if (setupActiveViewId && !features.some((feature) => feature.anchorViewId === setupActiveViewId)) return;
+    const canvas = cvCanvasRef.current;
+    const video = videoElementRef.current;
+    if (!canvas || (sourceType !== 'simulator' && (!video || video.readyState < 2))) return;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return;
+    const state = { ...simStateRef.current };
+    if (!renderInputFrame(ctx, 640, 360, sourceType, state, video, cvTerrainRendererRef.current)) return;
+    const imageData = ctx.getImageData(0, 0, 640, 360);
+    const image = canvas.toDataURL('image/jpeg', 0.9);
+    const id = `setup-view-${Date.now()}`;
+    if (sourceType === 'simulator' && setupViews.length === 0) {
+      simulatorReferenceStateRef.current = state;
+    }
+    engineRef.current.addSetupKeyframe(imageData, id, image);
+    setSetupViews((views) => [...views, { id, image }]);
+    setSetupActiveViewId(id);
+    setSetupSnapshot(image);
+  }, [sourceType, setupViews.length, setupSnapshot, setupActiveViewId, features]);
+
+  const finishSetupView = useCallback(() => {
+    if (!setupActiveViewId || !features.some((feature) => feature.anchorViewId === setupActiveViewId)) return;
+    setSetupSnapshot(null);
+  }, [features, setupActiveViewId]);
+
+  const finishRegistrationSetup = useCallback(() => {
+    const everyViewAnchored = setupViews.length >= 2 && setupViews.every((view) =>
+      features.some((feature) => feature.anchorViewId === view.id)
+    );
+    if (!everyViewAnchored || setupSnapshot) return;
+    setRegistrationSetup(false);
+    setSetupSnapshot(null);
+  }, [features, setupViews, setupSnapshot]);
 
   // Synchronize Registration Settings into the CV Engine
   useEffect(() => {
@@ -435,7 +495,7 @@ export default function App() {
 
   // Main CV Processing Loop (at 30 FPS)
   useEffect(() => {
-    if (!isConnected) return;
+    if (!isConnected || registrationSetup) return;
 
     let intervalId: number;
     let autoPatrolAngle = 0;
@@ -446,36 +506,48 @@ export default function App() {
       const ctx = cvCanvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) return;
 
-      // Update simulation time & auto-patrol
-      setSimState((prev) => {
-        const nextTime = prev.time + 33;
-        if (prev.autoPatrol) {
-          autoPatrolAngle += 0.02;
-          const patrolPan = Math.sin(autoPatrolAngle) * 120;
-          return { ...prev, time: nextTime, panX: patrolPan };
-        }
-        return { ...prev, time: nextTime };
-      });
-
-      // Render into CV canvas at 640x360
+      // Advance synthetic PTZ only for the simulator. Live sources may provide
+      // decoded video frames, but their camera pose is not guessed here.
+      let frameSimState = simStateRef.current;
       if (sourceType === 'simulator') {
-        cvTerrainRendererRef.current.render(ctx, 640, 360, simState);
-      } else if (
-        (sourceType === 'webcam' || sourceType === 'rear_camera') &&
-        videoElementRef.current &&
-        videoElementRef.current.readyState >= 2
-      ) {
-        ctx.drawImage(videoElementRef.current, 0, 0, 640, 360);
+        const currentSimState = simStateRef.current;
+        const nextSimState: SimulatorCameraState = {
+          ...currentSimState,
+          time: currentSimState.time + (regSettings.updateIntervalMs || 33),
+        };
+        if (currentSimState.autoPatrol) {
+          autoPatrolAngle += 0.02;
+          nextSimState.panX = Math.sin(autoPatrolAngle) * 120;
+        }
+        simStateRef.current = nextSimState;
+        frameSimState = nextSimState;
+        setSimState(nextSimState);
+      }
+
+      if (!renderInputFrame(ctx, 640, 360, sourceType, frameSimState, videoElementRef.current, cvTerrainRendererRef.current)) {
+        // No fresh decoded frame: never feed stale canvas pixels to registration.
+        engineRef.current.setExternalHomography(null);
+        return;
       }
 
       const imgData = ctx.getImageData(0, 0, 640, 360);
       const metrics = engineRef.current.processFrame(imgData);
+      const simulatorReference = simulatorReferenceStateRef.current;
+      if (sourceType === 'simulator' && simulatorReference && setupViews.length <= 1) {
+        // The simulator exposes exact PTZ state. Use its known camera transform
+        // for stable overlays while retaining CV metrics as diagnostics.
+        const knownTransform = getSimulatorHomography(simulatorReference, frameSimState);
+        engineRef.current.setExternalHomography(knownTransform);
+        metrics.homography = knownTransform;
+      } else {
+        engineRef.current.setExternalHomography(null);
+      }
       setRegistrationMetrics(metrics);
     };
 
     intervalId = window.setInterval(processCVFrame, regSettings.updateIntervalMs || 33);
     return () => clearInterval(intervalId);
-  }, [isConnected, sourceType, simState, regSettings.updateIntervalMs]);
+  }, [isConnected, registrationSetup, sourceType, setupViews.length, regSettings.updateIntervalMs]);
 
   // Feature Placement Handler
   const handleSelectFeatureForPlacement = (
@@ -494,6 +566,10 @@ export default function App() {
   const handleAddFeaturePoint = (refPoint: [number, number]) => {
     if (!pendingFeatureType) return;
     const def = FEATURE_LIBRARY[pendingFeatureType];
+    const currentMatch = engineRef.current.getCurrentMatchedView();
+    const anchorViewId = registrationSetup
+      ? setupActiveViewId
+      : currentMatch.independent ? currentMatch.id : undefined;
     const newFeature: ExerciseFeature = {
       id: `feat_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       type: pendingFeatureType,
@@ -507,6 +583,7 @@ export default function App() {
       customImageType: pendingFeatureOptions.customImageType,
       visible: true,
       createdAt: Date.now(),
+      ...(anchorViewId ? { anchorViewId } : {}),
     };
 
     setFeatures((prev) => [...prev, newFeature]);
@@ -690,6 +767,7 @@ export default function App() {
         color: f.color,
         customImage: f.customImage,
         customImageType: f.customImageType,
+        anchorViewId: f.anchorViewId,
       })),
       boundaries: boundaries.map((b) => ({
         ...b,
@@ -714,6 +792,7 @@ export default function App() {
         min_inliers: regSettings.minInliers,
       },
       reference_image: refImg || undefined,
+      reference_views: setupViews.length > 0 ? setupViews : undefined,
     };
 
     // Save to local storage
@@ -752,6 +831,7 @@ export default function App() {
         color: f.color,
         customImage: f.customImage,
         customImageType: f.customImageType,
+        anchorViewId: f.anchorViewId,
         visible: true,
         createdAt: Date.now(),
       }))
@@ -790,10 +870,46 @@ export default function App() {
       setRtspUrl(scenario.camera.rtsp_url);
     }
 
-    // Re-reference to current frame
-    setTimeout(() => {
-      captureAndSetReference();
-    }, 150);
+    engineRef.current.reset();
+    if (scenario.reference_views?.length) {
+      const referenceViews = scenario.reference_views;
+      setRegistrationSetup(true);
+      setSetupViews(referenceViews);
+      setSetupActiveViewId(null);
+      setSetupSnapshot(null);
+      void (async () => {
+        const restoreCanvas = document.createElement('canvas');
+        restoreCanvas.width = 640;
+        restoreCanvas.height = 360;
+        const ctx = restoreCanvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) {
+          setRegistrationSetup(false);
+          return;
+        }
+        for (const view of referenceViews) {
+          const image = new Image();
+          const imageLoaded = new Promise<void>((resolve, reject) => {
+            image.onload = () => resolve();
+            image.onerror = () => reject(new Error(`Could not restore camera view ${view.id}`));
+          });
+          image.src = view.image;
+          await imageLoaded;
+          ctx.clearRect(0, 0, 640, 360);
+          ctx.drawImage(image, 0, 0, 640, 360);
+          engineRef.current.addSetupKeyframe(ctx.getImageData(0, 0, 640, 360), view.id, view.image);
+        }
+        setRegistrationSetup(false);
+      })().catch((error) => {
+        console.warn('Could not restore saved camera anchor views:', error);
+        setRegistrationSetup(false);
+        setSetupViews([]);
+      });
+    } else {
+      setSetupViews([]);
+      setSetupActiveViewId(null);
+      setSetupSnapshot(null);
+      setRegistrationSetup(false);
+    }
   };
 
   const handleDeleteSavedScenario = (idx: number) => {
@@ -820,6 +936,12 @@ export default function App() {
           sourceType={sourceType}
           onChangeSourceType={(type) => {
             setSourceType(type);
+            setRegistrationSetup(true);
+            setSetupViews([]);
+            setSetupActiveViewId(null);
+            setSetupSnapshot(null);
+            simulatorReferenceStateRef.current = null;
+            engineRef.current.reset();
             if (type === 'rear_camera') {
               setCameraFacingMode('environment');
               setSelectedCameraDeviceId(null);
@@ -827,7 +949,6 @@ export default function App() {
               setCameraFacingMode('user');
               setSelectedCameraDeviceId(null);
             }
-            setTimeout(() => captureAndSetReference(), 200);
           }}
           cameraFacingMode={cameraFacingMode}
           onToggleCameraFacing={handleToggleCameraFacing}
@@ -909,7 +1030,74 @@ export default function App() {
           registrationMetrics={registrationMetrics}
           overlaySettings={overlaySettings}
           videoElement={videoElement}
+          registrationSetup={registrationSetup}
+          setupActiveViewId={setupActiveViewId}
+          setupSnapshot={setupSnapshot}
         />
+
+        {registrationSetup && (
+          <div className="absolute z-30 top-4 left-1/2 -translate-x-1/2 w-[min(560px,calc(100%-2rem))] rounded-lg border border-sky-500/50 bg-slate-950/95 p-4 shadow-2xl backdrop-blur">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-sm font-bold uppercase tracking-wider text-sky-300">Visual Anchor Setup</h2>
+                <p className="mt-1 text-xs leading-relaxed text-slate-300">
+                  {sourceType === 'rtsp'
+                    ? 'RTSP has no browser-decoded frames connected yet. Add a WebRTC or other browser video relay before capturing setup views.'
+                    : 'Capture a view and add its anchors. Press Finish This View to restore live video, move the camera, then capture another view. Registration starts after setup.'}
+                </p>
+              </div>
+              <span className="shrink-0 rounded bg-slate-800 px-2 py-1 font-mono text-xs text-slate-300">{setupViews.length} VIEWS</span>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {setupSnapshot ? (
+                <button
+                  onClick={finishSetupView}
+                  disabled={!features.some((feature) => feature.anchorViewId === setupActiveViewId)}
+                  className="rounded border border-amber-500/60 bg-amber-500/15 px-3 py-2 text-xs font-semibold text-amber-200 hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Finish This View
+                </button>
+              ) : (
+                <button
+                  onClick={captureSetupView}
+                  disabled={setupViews.length >= 12 || Boolean(setupActiveViewId && !features.some((feature) => feature.anchorViewId === setupActiveViewId)) || (sourceType !== 'simulator' && (!videoElement || videoElement.readyState < 2))}
+                  className="rounded border border-sky-500/60 bg-sky-500/15 px-3 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {setupActiveViewId ? 'Capture Another View' : 'Capture This View'}
+                </button>
+              )}
+              <button
+                onClick={() => setIsAddFeatureOpen(true)}
+                disabled={!setupActiveViewId || !setupSnapshot}
+                className="rounded border border-emerald-500/60 bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Add Anchor Object
+              </button>
+              <button
+                onClick={finishRegistrationSetup}
+                disabled={Boolean(setupSnapshot) || setupViews.length < 2 || setupViews.some((view) => !features.some((feature) => feature.anchorViewId === view.id))}
+                className="ml-auto rounded border border-indigo-400/60 bg-indigo-500/20 px-3 py-2 text-xs font-semibold text-indigo-100 hover:bg-indigo-500/30 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Finish Setup &amp; Register
+              </button>
+              <button
+                onClick={() => { setRegistrationSetup(false); setSetupSnapshot(null); }}
+                className="rounded px-2 py-2 text-xs text-slate-400 hover:text-white"
+              >
+                Skip
+              </button>
+            </div>
+            <div className="mt-2 text-[11px] text-slate-400">
+              {setupActiveViewId && setupSnapshot
+                ? `${features.filter((feature) => feature.anchorViewId === setupActiveViewId).length} anchors in current view. Click the frozen image after choosing an object, then finish this view.`
+                : setupActiveViewId
+                  ? 'Live feed restored. Move the camera to another view, then capture it.'
+                : 'Capture the current camera view to begin placing anchors.'}
+              {setupActiveViewId && !features.some((feature) => feature.anchorViewId === setupActiveViewId) ? ' Add at least one anchor before capturing the next view.' : ''}
+              {setupViews.length > 0 && setupViews.length < 2 ? ' Capture at least one more distinct view.' : ''}
+            </div>
+          </div>
+        )}
 
         {/* Floating Simulator PTZ Controls (when in Simulator mode) */}
         {sourceType === 'simulator' && (
@@ -940,6 +1128,12 @@ export default function App() {
             sourceType={sourceType}
             onChangeSourceType={(type) => {
               setSourceType(type);
+              setRegistrationSetup(true);
+              setSetupViews([]);
+              setSetupActiveViewId(null);
+              setSetupSnapshot(null);
+              simulatorReferenceStateRef.current = null;
+              engineRef.current.reset();
               if (type === 'rear_camera') {
                 setCameraFacingMode('environment');
                 setSelectedCameraDeviceId(null);
@@ -947,7 +1141,6 @@ export default function App() {
                 setCameraFacingMode('user');
                 setSelectedCameraDeviceId(null);
               }
-              setTimeout(() => captureAndSetReference(), 200);
             }}
             onSetCurrentAsReference={captureAndSetReference}
             onOpenAddFeature={() => setIsAddFeatureOpen(true)}
@@ -1042,6 +1235,12 @@ export default function App() {
         sourceType={sourceType}
         onChangeSourceType={(type) => {
           setSourceType(type);
+          setRegistrationSetup(true);
+          setSetupViews([]);
+          setSetupActiveViewId(null);
+          setSetupSnapshot(null);
+          simulatorReferenceStateRef.current = null;
+          engineRef.current.reset();
           if (type === 'rear_camera') {
             setCameraFacingMode('environment');
             setSelectedCameraDeviceId(null);
@@ -1049,7 +1248,6 @@ export default function App() {
             setCameraFacingMode('user');
             setSelectedCameraDeviceId(null);
           }
-          setTimeout(() => captureAndSetReference(), 200);
         }}
         cameraFacingMode={cameraFacingMode}
         onChangeFacingMode={setCameraFacingMode}
