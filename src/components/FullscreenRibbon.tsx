@@ -110,12 +110,22 @@ export const FullscreenRibbon: React.FC<FullscreenRibbonProps> = ({
             >
               Rear
             </button>
+            <button
+              onClick={() => onChangeSourceType('onvif')}
+              className={`px-2 py-0.5 rounded-full font-mono text-[10px] transition ${
+                sourceType === 'onvif'
+                  ? 'bg-emerald-600 text-white font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              ONVIF
+            </button>
           </div>
 
           <div className="w-[1px] h-4 bg-slate-700/60" />
 
           {/* Simulator PTZ quick toggle if in sim mode */}
-          {sourceType === 'simulator' && onToggleSimControls && (
+          {(sourceType === 'simulator' || sourceType === 'onvif') && onToggleSimControls && (
             <button
               onClick={onToggleSimControls}
               className={`flex items-center gap-1 px-2 py-1 rounded-full font-mono text-[10px] border transition ${

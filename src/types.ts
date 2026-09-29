@@ -75,7 +75,32 @@ export interface RegistrationMetrics {
   translationEstimate: [number, number];
 }
 
-export type VideoSourceType = 'simulator' | 'rear_camera' | 'webcam' | 'rtsp';
+export interface CameraPtzPose {
+  pan: number;
+  tilt: number;
+  zoom: number;
+}
+
+export interface OnvifCameraConfig {
+  host: string;
+  port: number;
+  rtspPort: number;
+  endpointPath: string;
+  username: string;
+  password: string;
+  profileToken?: string;
+}
+
+export interface OnvifMediaProfile {
+  token: string;
+  name: string;
+  width: number;
+  height: number;
+  encoding: string;
+  frameRate: number;
+}
+
+export type VideoSourceType = 'simulator' | 'rear_camera' | 'webcam' | 'rtsp' | 'onvif';
 
 export interface CameraConfig {
   sourceType: VideoSourceType;
@@ -150,5 +175,5 @@ export interface ScenarioData {
     min_inliers: number;
   };
   reference_image?: string; // base64 data URL
-  reference_views?: Array<{ id: string; image: string }>;
+  reference_views?: Array<{ id: string; image: string; ptzPose?: CameraPtzPose }>;
 }

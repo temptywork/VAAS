@@ -1,4 +1,4 @@
-import { RegistrationMetrics, RegistrationQuality, RegistrationSettings } from '../types';
+import { CameraPtzPose, RegistrationMetrics, RegistrationQuality, RegistrationSettings } from '../types';
 import {
   Keypoint,
   detectFeatures,
@@ -15,6 +15,7 @@ interface RegistrationKeyframe {
   height: number;
   /** Maps the original overlay reference coordinates into this keyframe. */
   anchorToKeyframe: Homography | null;
+  ptzPose?: CameraPtzPose;
 }
 
 const IDENTITY: Homography = [1, 0, 0, 0, 1, 0, 0, 0, 1];
@@ -42,6 +43,7 @@ export class VisualRegistrationEngine {
   private currentMatchedViewId: string | null = null;
   private currentMatchedViewHomography: Homography | null = null;
   private currentMatchedViewIndependent = false;
+  private currentPtzPose: CameraPtzPose | null = null;
 
   private curGrayBuffer: Uint8Array | null = null;
   private currentMatches: FeatureMatch[] = [];
@@ -79,7 +81,8 @@ export class VisualRegistrationEngine {
   public setReferenceFrame(
     imageData: ImageData,
     dataUrl?: string,
-    viewId = 'anchor-view-1'
+    viewId = 'anchor-view-1',
+    ptzPose?: CameraPtzPose
   ): { keypointCount: number } {
     const { width, height, data } = imageData;
     this.refWidth = width;
@@ -102,6 +105,7 @@ export class VisualRegistrationEngine {
       width,
       height,
       anchorToKeyframe: [...IDENTITY],
+      ptzPose,
     }];
     this.lastKeyframeSearchAt = 0;
     this.keyframeSearchCursor = 1;
@@ -126,9 +130,9 @@ export class VisualRegistrationEngine {
   }
 
   /** Add a manually captured setup view. It has its own local coordinate frame. */
-  public addSetupKeyframe(imageData: ImageData, viewId: string, dataUrl?: string): number {
+  public addSetupKeyframe(imageData: ImageData, viewId: string, dataUrl?: string, ptzPose?: CameraPtzPose): number {
     if (!this.refGray) {
-      const result = this.setReferenceFrame(imageData, dataUrl, viewId);
+      const result = this.setReferenceFrame(imageData, dataUrl, viewId, ptzPose);
       return result.keypointCount;
     }
     const { width, height, data } = imageData;
@@ -136,7 +140,7 @@ export class VisualRegistrationEngine {
     rgbaToGrayscale(data, width, height, gray);
     const keypoints = detectFeatures(gray, width, height, this.settings.maxFeatures, this.settings.fastThreshold ?? 16);
     this.keyframes = this.keyframes.filter((frame) => frame.id !== viewId);
-    this.keyframes.push({ id: viewId, independent: true, keypoints, width, height, anchorToKeyframe: null });
+    this.keyframes.push({ id: viewId, independent: true, keypoints, width, height, anchorToKeyframe: null, ptzPose });
     if (this.keyframes.length > 24) this.evictOldestNonAnchorView();
     return keypoints.length;
   }
@@ -190,6 +194,11 @@ export class VisualRegistrationEngine {
 
   public setExternalHomography(homography: Homography | null): void {
     this.externalHomography = homography;
+  }
+
+  /** Camera telemetry ranks candidate anchor views; visual feature matches still confirm each registration. */
+  public setCameraPoseHint(pose: CameraPtzPose | null): void {
+    this.currentPtzPose = pose;
   }
 
   /**
@@ -291,11 +300,24 @@ export class VisualRegistrationEngine {
     let recoveredFromKeyframe = false;
     if (!hasReliableSupport && this.keyframes.length > 1 && performance.now() - this.lastKeyframeSearchAt >= 250) {
       this.lastKeyframeSearchAt = performance.now();
-      const searchCount = Math.min(3, this.keyframes.length - 1);
-      for (let offset = 0; offset < searchCount; offset++) {
-        const index = 1 + ((this.keyframeSearchCursor - 1 + offset) % (this.keyframes.length - 1));
-        const keyframe = this.keyframes[index];
-        if (keyframe.keypoints === this.refKeypoints) continue;
+      const candidates = this.keyframes
+        .map((keyframe, index) => ({ keyframe, index }))
+        .filter(({ keyframe, index }) => index > 0 && keyframe.keypoints !== this.refKeypoints);
+      if (this.currentPtzPose && candidates.some(({ keyframe }) => keyframe.ptzPose)) {
+        const poseDistance = (pose?: CameraPtzPose) => {
+          if (!pose) return Number.POSITIVE_INFINITY;
+          const pan = (pose.pan - this.currentPtzPose!.pan) / 2;
+          const tilt = (pose.tilt - this.currentPtzPose!.tilt) / 2;
+          const zoom = pose.zoom - this.currentPtzPose!.zoom;
+          return pan * pan + tilt * tilt + zoom * zoom * 1.5;
+        };
+        candidates.sort((a, b) => poseDistance(a.keyframe.ptzPose) - poseDistance(b.keyframe.ptzPose));
+      } else if (candidates.length > 1) {
+        const offset = Math.max(0, this.keyframeSearchCursor - 1) % candidates.length;
+        candidates.push(...candidates.splice(0, offset));
+      }
+      const searchCount = Math.min(3, candidates.length);
+      for (const { keyframe } of candidates.slice(0, searchCount)) {
         const keyframeMatches = matchFeatures(
           keyframe.keypoints,
           this.currentKeypoints,
@@ -326,7 +348,9 @@ export class VisualRegistrationEngine {
         recoveredFromKeyframe = true;
         break;
       }
-      this.keyframeSearchCursor = 1 + ((this.keyframeSearchCursor - 1 + searchCount) % (this.keyframes.length - 1));
+      if (!this.currentPtzPose && candidates.length > 0) {
+        this.keyframeSearchCursor = 1 + ((this.keyframeSearchCursor - 1 + searchCount) % candidates.length);
+      }
     }
 
     const finalReliable = hasReliableSupport || recoveredFromKeyframe;

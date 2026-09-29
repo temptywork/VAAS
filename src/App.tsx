@@ -11,6 +11,9 @@ import {
   RegistrationSettings,
   ScenarioData,
   VideoSourceType,
+  CameraPtzPose,
+  OnvifCameraConfig,
+  OnvifMediaProfile,
 } from './types';
 import { VisualRegistrationEngine } from './cv/registrationEngine';
 import { TacticalCanvas } from './components/TacticalCanvas';
@@ -22,6 +25,7 @@ import { BoundaryConfigModal } from './components/BoundaryConfigModal';
 import { ScenarioModal } from './components/ScenarioModal';
 import { SettingsModal } from './components/SettingsModal';
 import { ExerciseSimulatorControls } from './components/ExerciseSimulatorControls';
+import { OnvifSetupModal } from './components/OnvifSetupModal';
 import { DiagnosticsDrawer } from './components/DiagnosticsDrawer';
 import { DEFAULT_SCENARIOS } from './data/defaultScenarios';
 import {
@@ -32,6 +36,18 @@ import {
 } from './components/ExerciseTerrainRenderer';
 import { FEATURE_LIBRARY } from './data/featureDefinitions';
 
+async function requestOnvif<T = any>(path: string, body?: unknown): Promise<T> {
+  const response = await fetch(path, body === undefined ? { cache: 'no-store' } : {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    cache: 'no-store',
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `ONVIF request failed (${response.status}).`);
+  return result as T;
+}
+
 export default function App() {
   // Visual Registration CV Engine Instance
   const engineRef = useRef<VisualRegistrationEngine>(new VisualRegistrationEngine());
@@ -39,6 +55,7 @@ export default function App() {
   const cvTerrainRendererRef = useRef<ExerciseTerrainRenderer>(new ExerciseTerrainRenderer());
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const activeStreamRef = useRef<MediaStream | null>(null);
+  const onvifPoseRef = useRef<CameraPtzPose | null>(null);
 
   // Camera & Stream State
   const [sourceType, setSourceType] = useState<VideoSourceType>('webcam');
@@ -50,10 +67,39 @@ export default function App() {
   const [rtspUrl, setRtspUrl] = useState<string>('rtsp://exercise-control:sec88@192.168.1.100:554/live');
   const [isConnected, setIsConnected] = useState<boolean>(true);
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
+  const [isVideoReady, setIsVideoReady] = useState(false);
   const [registrationSetup, setRegistrationSetup] = useState(true);
-  const [setupViews, setSetupViews] = useState<Array<{ id: string; image: string }>>([]);
+  const [setupViews, setSetupViews] = useState<Array<{ id: string; image: string; ptzPose?: CameraPtzPose }>>([]);
   const [setupActiveViewId, setSetupActiveViewId] = useState<string | null>(null);
   const [setupSnapshot, setSetupSnapshot] = useState<string | null>(null);
+  const [onvifConfig, setOnvifConfig] = useState<OnvifCameraConfig>(() => {
+    const defaults: OnvifCameraConfig = {
+      host: '', port: 80, rtspPort: 554, endpointPath: '/onvif/device_service', username: '', password: '',
+    };
+    try {
+      const saved = localStorage.getItem('vaas_onvif_camera_config');
+      return saved ? { ...defaults, ...JSON.parse(saved) } : defaults;
+    } catch {
+      return defaults;
+    }
+  });
+  const [onvifDraft, setOnvifDraft] = useState<OnvifCameraConfig>(() => {
+    const defaults: OnvifCameraConfig = {
+      host: '', port: 80, rtspPort: 554, endpointPath: '/onvif/device_service', username: '', password: '',
+    };
+    try {
+      const saved = localStorage.getItem('vaas_onvif_camera_config');
+      return saved ? { ...defaults, ...JSON.parse(saved) } : defaults;
+    } catch {
+      return defaults;
+    }
+  });
+  const [onvifProfiles, setOnvifProfiles] = useState<OnvifMediaProfile[]>([]);
+  const [onvifDeviceName, setOnvifDeviceName] = useState('');
+  const [isOnvifSetupOpen, setIsOnvifSetupOpen] = useState(false);
+  const [onvifBusy, setOnvifBusy] = useState(false);
+  const [onvifError, setOnvifError] = useState<string | null>(null);
+  const [onvifStatus, setOnvifStatus] = useState('');
 
   // Simulator Camera PTZ State
   const [simState, setSimState] = useState<SimulatorCameraState>({
@@ -277,12 +323,16 @@ export default function App() {
   useEffect(() => {
     let currentStream: MediaStream | null = null;
     let videoEl: HTMLVideoElement | null = null;
+    setIsVideoReady(false);
 
     if ((sourceType === 'webcam' || sourceType === 'rear_camera') && isConnected) {
       videoEl = document.createElement('video');
       videoEl.autoplay = true;
       videoEl.playsInline = true;
       videoEl.muted = true;
+      const markVideoReady = () => setIsVideoReady(true);
+      videoEl.addEventListener('loadeddata', markVideoReady);
+      videoEl.addEventListener('playing', markVideoReady);
 
       // Determine facingMode: 'environment' for rear camera, otherwise cameraFacingMode
       const targetFacingMode = sourceType === 'rear_camera' ? 'environment' : cameraFacingMode;
@@ -370,9 +420,222 @@ export default function App() {
 
     return () => {
       currentStream?.getTracks().forEach((track) => track.stop());
+      setIsVideoReady(false);
       setIsTorchOn(false);
     };
   }, [sourceType, isConnected, cameraFacingMode, selectedCameraDeviceId, cameraConfig.resolution]);
+
+  const handleOnvifDiscover = useCallback(async () => {
+    setOnvifBusy(true);
+    setOnvifError(null);
+    setOnvifStatus('Discovering camera…');
+    try {
+      const result = await requestOnvif<{
+        device: { manufacturer: string; model: string };
+        profiles: OnvifMediaProfile[];
+      }>('/api/onvif/discover', onvifDraft);
+      setOnvifProfiles(result.profiles);
+      const best = [...result.profiles].sort((a, b) => {
+        const h264 = Number(b.encoding === 'H264') - Number(a.encoding === 'H264');
+        return h264 || (b.width * b.height) - (a.width * a.height);
+      })[0];
+      const profileToken = result.profiles.some((profile) => profile.token === onvifDraft.profileToken)
+        ? onvifDraft.profileToken
+        : best?.token;
+      setOnvifDraft((current) => ({ ...current, profileToken }));
+      setOnvifDeviceName([result.device.manufacturer, result.device.model].filter(Boolean).join(' ') || 'ONVIF PTZ camera');
+      setOnvifStatus('Camera discovered');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not discover the ONVIF camera.';
+      setOnvifError(message);
+      setOnvifStatus('Camera setup failed');
+    } finally {
+      setOnvifBusy(false);
+    }
+  }, [onvifDraft]);
+
+  const handleOnvifSaveAndConnect = useCallback(() => {
+    try {
+      localStorage.setItem('vaas_onvif_camera_config', JSON.stringify(onvifDraft));
+      setOnvifConfig(onvifDraft);
+      setOnvifError(null);
+      setIsOnvifSetupOpen(false);
+      setOnvifStatus('Connecting…');
+      setIsConnected(true);
+    } catch {
+      setOnvifError('The browser could not save this camera configuration locally.');
+    }
+  }, [onvifDraft]);
+
+  const handleOpenOnvifSetup = () => {
+    setOnvifDraft({ ...onvifConfig });
+    setOnvifError(null);
+    setIsConnected(false);
+    setIsOnvifSetupOpen(true);
+  };
+
+  const handleCloseOnvifSetup = () => {
+    setOnvifDraft({ ...onvifConfig });
+    setIsOnvifSetupOpen(false);
+    if (sourceType === 'onvif' && onvifConfig.host.trim()) setIsConnected(true);
+  };
+
+  const handleChangeSourceType = (type: VideoSourceType) => {
+    setSourceType(type);
+    setIsVideoReady(false);
+    setRegistrationSetup(true);
+    setSetupViews([]);
+    setSetupActiveViewId(null);
+    setSetupSnapshot(null);
+    simulatorReferenceStateRef.current = null;
+    onvifPoseRef.current = null;
+    engineRef.current.setCameraPoseHint(null);
+    engineRef.current.reset();
+
+    if (type === 'onvif') {
+      setOnvifError(null);
+      if (onvifConfig.host.trim()) {
+        setIsConnected(true);
+        setOnvifStatus('Connecting…');
+      } else {
+        setIsConnected(false);
+        setIsOnvifSetupOpen(true);
+      }
+    } else {
+      setIsConnected(true);
+      setOnvifStatus('');
+      if (type === 'rear_camera') {
+        setCameraFacingMode('environment');
+        setSelectedCameraDeviceId(null);
+      } else if (type === 'webcam') {
+        setCameraFacingMode('user');
+        setSelectedCameraDeviceId(null);
+      }
+    }
+  };
+
+  const sendOnvifPtz = (command: { action?: 'stop' | 'home'; pan?: number; tilt?: number; zoom?: number }) => {
+    void requestOnvif('/api/onvif/ptz', command).catch((error) => {
+      setOnvifError(error instanceof Error ? error.message : 'ONVIF PTZ command failed.');
+    });
+  };
+
+  const handleOnvifPan = (dx: number, dy: number) => {
+    sendOnvifPtz({ pan: (dx / 35) * 0.05, tilt: (-dy / 25) * 0.05, zoom: 0 });
+  };
+
+  const handleOnvifZoom = (delta: number) => {
+    if (Math.abs(delta) < 0.001) return;
+    sendOnvifPtz({ pan: 0, tilt: 0, zoom: Math.sign(delta) * Math.min(0.04, Math.abs(delta) * 0.25) });
+  };
+
+  useEffect(() => {
+    if (sourceType !== 'onvif' || !isConnected) return;
+    let cancelled = false;
+    let video: HTMLVideoElement | null = null;
+    let hls: import('hls.js').default | null = null;
+    setOnvifError(null);
+    setOnvifStatus('Connecting to ONVIF camera…');
+
+    const connect = async () => {
+      try {
+        const result = await requestOnvif<{
+          device: { manufacturer: string; model: string };
+          profile: OnvifMediaProfile;
+          profiles: OnvifMediaProfile[];
+          streamPath: string;
+        }>('/api/onvif/connect', onvifConfig);
+        if (cancelled) return;
+        setOnvifProfiles(result.profiles);
+        setOnvifDeviceName([result.device.manufacturer, result.device.model].filter(Boolean).join(' ') || 'ONVIF PTZ camera');
+        if (result.profile.token && result.profile.token !== onvifConfig.profileToken) {
+          const savedConfig = { ...onvifConfig, profileToken: result.profile.token };
+          setOnvifConfig(savedConfig);
+          setOnvifDraft(savedConfig);
+          localStorage.setItem('vaas_onvif_camera_config', JSON.stringify(savedConfig));
+        }
+
+        video = document.createElement('video');
+        video.autoplay = true;
+        video.playsInline = true;
+        video.muted = true;
+        const markVideoReady = () => setIsVideoReady(true);
+        video.addEventListener('loadeddata', markVideoReady);
+        video.addEventListener('playing', markVideoReady);
+        videoElementRef.current = video;
+        setVideoElement(video);
+
+        const HlsPlayer = (await import('hls.js/light')).default;
+        if (HlsPlayer.isSupported()) {
+          const player = new HlsPlayer({ enableWorker: true, lowLatencyMode: true, liveSyncDurationCount: 2 });
+          hls = player;
+          player.loadSource(result.streamPath);
+          player.attachMedia(video);
+          player.on(HlsPlayer.Events.MANIFEST_PARSED, () => { void video?.play().catch(() => {}); });
+          player.on(HlsPlayer.Events.ERROR, (_event, data) => {
+            if (data.fatal) {
+              setOnvifError(`Video relay error: ${data.details}`);
+              setOnvifStatus('Video relay error');
+            }
+          });
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = result.streamPath;
+          await video.play().catch(() => {});
+        } else {
+          throw new Error('This browser cannot play the camera relay. Use a browser with HLS support.');
+        }
+        setOnvifStatus(`Connected · ${result.profile.width}×${result.profile.height} ${result.profile.encoding}`);
+      } catch (error) {
+        if (cancelled) return;
+        setOnvifError(error instanceof Error ? error.message : 'Could not connect to the ONVIF camera.');
+        setOnvifStatus('Connection failed');
+        setIsConnected(false);
+      }
+    };
+
+    void connect();
+    return () => {
+      cancelled = true;
+      hls?.destroy();
+      if (video) {
+        setIsVideoReady(false);
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      }
+      if (videoElementRef.current === video) videoElementRef.current = null;
+      setVideoElement((current) => current === video ? null : current);
+      void requestOnvif('/api/onvif/disconnect', {}).catch(() => {});
+    };
+  }, [sourceType, isConnected]);
+
+  useEffect(() => {
+    if (sourceType !== 'onvif' || !isConnected) return;
+    let cancelled = false;
+    let polling = false;
+    const refreshPose = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const result = await requestOnvif<{ ptzPose: CameraPtzPose | null }>('/api/onvif/status');
+        if (cancelled) return;
+        onvifPoseRef.current = result.ptzPose;
+        engineRef.current.setCameraPoseHint(result.ptzPose);
+      } catch {
+        // Visual matching remains active during brief camera telemetry gaps.
+      } finally {
+        polling = false;
+      }
+    };
+    void refreshPose();
+    const timer = window.setInterval(refreshPose, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      onvifPoseRef.current = null;
+      engineRef.current.setCameraPoseHint(null);
+    };
+  }, [sourceType, isConnected]);
 
   // Mobile Torch / Flashlight Toggle Handler
   const handleToggleTorch = async () => {
@@ -457,7 +720,7 @@ export default function App() {
     if (setupActiveViewId && !features.some((feature) => feature.anchorViewId === setupActiveViewId)) return;
     const canvas = cvCanvasRef.current;
     const video = videoElementRef.current;
-    if (!canvas || (sourceType !== 'simulator' && (!video || video.readyState < 2))) return;
+    if (!canvas || (sourceType !== 'simulator' && (!video || !isVideoReady || video.readyState < 2))) return;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
     const state = { ...simStateRef.current };
@@ -465,14 +728,15 @@ export default function App() {
     const imageData = ctx.getImageData(0, 0, 640, 360);
     const image = canvas.toDataURL('image/jpeg', 0.9);
     const id = `setup-view-${Date.now()}`;
+    const ptzPose = sourceType === 'onvif' ? onvifPoseRef.current || undefined : undefined;
     if (sourceType === 'simulator' && setupViews.length === 0) {
       simulatorReferenceStateRef.current = state;
     }
-    engineRef.current.addSetupKeyframe(imageData, id, image);
-    setSetupViews((views) => [...views, { id, image }]);
+    engineRef.current.addSetupKeyframe(imageData, id, image, ptzPose);
+    setSetupViews((views) => [...views, { id, image, ptzPose }]);
     setSetupActiveViewId(id);
     setSetupSnapshot(image);
-  }, [sourceType, setupViews.length, setupSnapshot, setupActiveViewId, features]);
+  }, [sourceType, setupViews.length, setupSnapshot, setupActiveViewId, features, isVideoReady]);
 
   const finishSetupView = useCallback(() => {
     if (!setupActiveViewId || !features.some((feature) => feature.anchorViewId === setupActiveViewId)) return;
@@ -896,7 +1160,7 @@ export default function App() {
           await imageLoaded;
           ctx.clearRect(0, 0, 640, 360);
           ctx.drawImage(image, 0, 0, 640, 360);
-          engineRef.current.addSetupKeyframe(ctx.getImageData(0, 0, 640, 360), view.id, view.image);
+          engineRef.current.addSetupKeyframe(ctx.getImageData(0, 0, 640, 360), view.id, view.image, view.ptzPose);
         }
         setRegistrationSetup(false);
       })().catch((error) => {
@@ -934,22 +1198,10 @@ export default function App() {
       {!isFullscreen && (
         <Toolbar
           sourceType={sourceType}
-          onChangeSourceType={(type) => {
-            setSourceType(type);
-            setRegistrationSetup(true);
-            setSetupViews([]);
-            setSetupActiveViewId(null);
-            setSetupSnapshot(null);
-            simulatorReferenceStateRef.current = null;
-            engineRef.current.reset();
-            if (type === 'rear_camera') {
-              setCameraFacingMode('environment');
-              setSelectedCameraDeviceId(null);
-            } else if (type === 'webcam') {
-              setCameraFacingMode('user');
-              setSelectedCameraDeviceId(null);
-            }
-          }}
+          onChangeSourceType={handleChangeSourceType}
+          onOpenOnvifSetup={handleOpenOnvifSetup}
+          onvifConfigured={Boolean(onvifConfig.host.trim())}
+          onvifStatus={onvifError || onvifStatus}
           cameraFacingMode={cameraFacingMode}
           onToggleCameraFacing={handleToggleCameraFacing}
           availableCameras={availableCameras}
@@ -962,10 +1214,21 @@ export default function App() {
           onChangeRtspUrl={setRtspUrl}
           isConnected={isConnected}
           onConnect={() => {
+            if (sourceType === 'onvif' && !onvifConfig.host.trim()) {
+              setIsOnvifSetupOpen(true);
+              return;
+            }
+            if (sourceType === 'onvif') {
+              setOnvifError(null);
+              setOnvifStatus('Connecting…');
+            }
             setIsConnected(true);
-            setTimeout(() => captureAndSetReference(), 200);
+            if (sourceType !== 'onvif') setTimeout(() => captureAndSetReference(), 200);
           }}
-          onDisconnect={() => setIsConnected(false)}
+          onDisconnect={() => {
+            setIsConnected(false);
+            if (sourceType === 'onvif') setOnvifStatus('Disconnected');
+          }}
           isDrawingBoundary={isDrawingBoundary}
           activeBoundaryPointsCount={activeBoundaryPoints.length}
           onStartBoundary={() => handleStartDrawingBoundary()}
@@ -1060,7 +1323,7 @@ export default function App() {
               ) : (
                 <button
                   onClick={captureSetupView}
-                  disabled={setupViews.length >= 12 || Boolean(setupActiveViewId && !features.some((feature) => feature.anchorViewId === setupActiveViewId)) || (sourceType !== 'simulator' && (!videoElement || videoElement.readyState < 2))}
+                  disabled={setupViews.length >= 12 || Boolean(setupActiveViewId && !features.some((feature) => feature.anchorViewId === setupActiveViewId)) || (sourceType !== 'simulator' && (!videoElement || !isVideoReady || videoElement.readyState < 2))}
                   className="rounded border border-sky-500/60 bg-sky-500/15 px-3 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-500/25 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {setupActiveViewId ? 'Capture Another View' : 'Capture This View'}
@@ -1099,13 +1362,18 @@ export default function App() {
           </div>
         )}
 
-        {/* Floating Simulator PTZ Controls (when in Simulator mode) */}
-        {sourceType === 'simulator' && (
+        {/* Shared PTZ controls for the exercise simulator and a real ONVIF camera */}
+        {(sourceType === 'simulator' || sourceType === 'onvif') && (
           <ExerciseSimulatorControls
             isOpen={showSimControls}
             onClose={() => setShowSimControls(false)}
             state={simState}
             onChangeState={setSimState}
+            onvifMode={sourceType === 'onvif'}
+            onHardwarePan={handleOnvifPan}
+            onHardwareZoom={handleOnvifZoom}
+            onHardwareStop={() => sendOnvifPtz({ action: 'stop' })}
+            onHardwareHome={() => sendOnvifPtz({ action: 'home' })}
           />
         )}
 
@@ -1126,22 +1394,7 @@ export default function App() {
             allLayersVisible={overlaySettings.showAllLayers !== false}
             onToggleAllLayers={handleToggleAllLayers}
             sourceType={sourceType}
-            onChangeSourceType={(type) => {
-              setSourceType(type);
-              setRegistrationSetup(true);
-              setSetupViews([]);
-              setSetupActiveViewId(null);
-              setSetupSnapshot(null);
-              simulatorReferenceStateRef.current = null;
-              engineRef.current.reset();
-              if (type === 'rear_camera') {
-                setCameraFacingMode('environment');
-                setSelectedCameraDeviceId(null);
-              } else if (type === 'webcam') {
-                setCameraFacingMode('user');
-                setSelectedCameraDeviceId(null);
-              }
-            }}
+            onChangeSourceType={handleChangeSourceType}
             onSetCurrentAsReference={captureAndSetReference}
             onOpenAddFeature={() => setIsAddFeatureOpen(true)}
             onOpenBoundaryConfig={() => setIsBoundaryConfigOpen(true)}
@@ -1233,22 +1486,7 @@ export default function App() {
         onUpdateOverlaySettings={setOverlaySettings}
         onSetCurrentAsReference={captureAndSetReference}
         sourceType={sourceType}
-        onChangeSourceType={(type) => {
-          setSourceType(type);
-          setRegistrationSetup(true);
-          setSetupViews([]);
-          setSetupActiveViewId(null);
-          setSetupSnapshot(null);
-          simulatorReferenceStateRef.current = null;
-          engineRef.current.reset();
-          if (type === 'rear_camera') {
-            setCameraFacingMode('environment');
-            setSelectedCameraDeviceId(null);
-          } else if (type === 'webcam') {
-            setCameraFacingMode('user');
-            setSelectedCameraDeviceId(null);
-          }
-        }}
+        onChangeSourceType={handleChangeSourceType}
         cameraFacingMode={cameraFacingMode}
         onChangeFacingMode={setCameraFacingMode}
         availableCameras={availableCameras}
@@ -1257,6 +1495,30 @@ export default function App() {
         isTorchOn={isTorchOn}
         hasTorchSupport={hasTorchSupport}
         onToggleTorch={handleToggleTorch}
+      />
+
+      <OnvifSetupModal
+        isOpen={isOnvifSetupOpen}
+        config={onvifDraft}
+        profiles={onvifProfiles}
+        deviceName={onvifDeviceName}
+        isBusy={onvifBusy}
+        error={onvifError}
+        onChange={setOnvifDraft}
+        onDiscover={handleOnvifDiscover}
+        onSaveAndConnect={handleOnvifSaveAndConnect}
+        onClose={handleCloseOnvifSetup}
+        onForget={() => {
+          localStorage.removeItem('vaas_onvif_camera_config');
+          const emptyConfig = { host: '', port: 80, rtspPort: 554, endpointPath: '/onvif/device_service', username: '', password: '' };
+          setOnvifConfig(emptyConfig);
+          setOnvifDraft(emptyConfig);
+          setOnvifProfiles([]);
+          setOnvifDeviceName('');
+          setOnvifError(null);
+          setIsConnected(false);
+          setIsOnvifSetupOpen(false);
+        }}
       />
     </div>
   );

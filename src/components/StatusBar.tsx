@@ -128,6 +128,11 @@ export const StatusBar: React.FC<StatusBarProps> = ({
               SIMULATOR
             </span>
           )}
+          {sourceType === 'onvif' && (
+            <span className="text-emerald-300 bg-emerald-950/80 border border-emerald-500/40 px-1.5 py-0.5 rounded text-[10px] font-mono">
+              ONVIF PTZ + VISUAL CV
+            </span>
+          )}
           {sourceType === 'rtsp' && (
             <span className="text-amber-300 bg-amber-950/80 border border-amber-500/40 px-1.5 py-0.5 rounded text-[10px] font-mono">
               RTSP

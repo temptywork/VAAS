@@ -142,6 +142,8 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
         ctx.textAlign = 'center';
         const message = sourceType === 'rtsp'
           ? 'RTSP NEEDS A BROWSER-DECODABLE RELAY (E.G. WEBRTC)'
+          : sourceType === 'onvif'
+            ? 'CONNECT TO THE ONVIF CAMERA TO LOAD ITS VIDEO STREAM'
           : sourceType === 'rear_camera'
             ? 'CONNECTING TO MOBILE REAR CAMERA (ENVIRONMENT)...'
             : 'CONNECTING TO WEBCAM / FRONT CAMERA...';

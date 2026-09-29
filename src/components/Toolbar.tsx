@@ -73,6 +73,9 @@ interface ToolbarProps {
   onOpenSettings: () => void;
   registrationQuality: RegistrationQuality;
   hasReference: boolean;
+  onOpenOnvifSetup?: () => void;
+  onvifConfigured?: boolean;
+  onvifStatus?: string;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
@@ -118,6 +121,9 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onOpenSettings,
   registrationQuality,
   hasReference,
+  onOpenOnvifSetup,
+  onvifConfigured = false,
+  onvifStatus,
 }) => {
   const [confirmClear, setConfirmClear] = useState(false);
 
@@ -180,8 +186,26 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               <option value="rtsp" className="bg-slate-900 text-slate-200">
                 RTSP IP Camera Stream
               </option>
+              <option value="onvif" className="bg-slate-900 text-emerald-300">
+                ONVIF supported Camera
+              </option>
             </select>
           </div>
+
+          {sourceType === 'onvif' && (
+            <div className="flex items-center gap-1.5">
+              <span title={onvifStatus} className={`max-w-[170px] truncate font-mono text-[10px] ${onvifStatus?.startsWith('Connected') ? 'text-emerald-300' : 'text-slate-400'}`}>
+                {onvifStatus || (onvifConfigured ? 'Camera saved' : 'Setup required')}
+              </span>
+              <button
+                type="button"
+                onClick={onOpenOnvifSetup}
+                className="rounded border border-sky-500/50 bg-sky-500/10 px-2 py-1.5 font-mono text-[10px] text-sky-200 hover:bg-sky-500/20"
+              >
+                {onvifConfigured ? 'Camera Setup' : 'Set Up Camera'}
+              </button>
+            </div>
+          )}
 
           {/* Quick Flip Camera (Rear <-> Front) */}
           {(sourceType === 'rear_camera' || sourceType === 'webcam') && onToggleCameraFacing && (
@@ -475,7 +499,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         </button>
 
         {/* Simulator Pan/Tilt Controls Toggle */}
-        {sourceType === 'simulator' && (
+        {(sourceType === 'simulator' || sourceType === 'onvif') && (
           <button
             id="btn-toggle-sim-controls"
             onClick={onToggleSimControls}
@@ -484,10 +508,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 ? 'bg-sky-950 border-sky-500 text-sky-300'
                 : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
             }`}
-            title="Toggle Simulator Camera Pan / Tilt / Zoom Controls"
+            title={sourceType === 'onvif' ? 'Toggle ONVIF camera Pan / Tilt / Zoom controls' : 'Toggle Simulator Camera Pan / Tilt / Zoom Controls'}
           >
             <Sliders className="w-3.5 h-3.5" />
-            <span>Camera PTZ</span>
+            <span>{sourceType === 'onvif' ? 'ONVIF PTZ' : 'Camera PTZ'}</span>
           </button>
         )}
 

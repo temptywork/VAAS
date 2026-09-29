@@ -684,6 +684,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </div>
                     </div>
                   </button>
+
+                  <button
+                    type="button"
+                    onClick={() => onChangeSourceType?.('onvif')}
+                    className={`flex items-start gap-2.5 p-2.5 rounded border text-left transition ${
+                      sourceType === 'onvif'
+                        ? 'bg-emerald-950/40 border-emerald-500 text-emerald-200 ring-1 ring-emerald-500/50'
+                        : 'bg-slate-900/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    <Camera className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="text-xs font-semibold">ONVIF supported Camera</div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        Discover its video profile, receive an RTSP relay, and use ONVIF PTZ with visual registration.
+                      </div>
+                    </div>
+                  </button>
                 </div>
               </div>
 

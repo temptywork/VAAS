@@ -17,6 +17,11 @@ interface ExerciseSimulatorControlsProps {
   onClose: () => void;
   state: SimulatorCameraState;
   onChangeState: (updater: (prev: SimulatorCameraState) => SimulatorCameraState) => void;
+  onvifMode?: boolean;
+  onHardwarePan?: (dx: number, dy: number) => void;
+  onHardwareZoom?: (delta: number) => void;
+  onHardwareStop?: () => void;
+  onHardwareHome?: () => void;
 }
 
 export const ExerciseSimulatorControls: React.FC<ExerciseSimulatorControlsProps> = ({
@@ -24,10 +29,19 @@ export const ExerciseSimulatorControls: React.FC<ExerciseSimulatorControlsProps>
   onClose,
   state,
   onChangeState,
+  onvifMode = false,
+  onHardwarePan,
+  onHardwareZoom,
+  onHardwareStop,
+  onHardwareHome,
 }) => {
   if (!isOpen) return null;
 
   const handlePan = (dx: number, dy: number) => {
+    if (onvifMode) {
+      onHardwarePan?.(dx, dy);
+      return;
+    }
     onChangeState((prev) => ({
       ...prev,
       panX: Math.max(-350, Math.min(350, prev.panX + dx)),
@@ -36,6 +50,10 @@ export const ExerciseSimulatorControls: React.FC<ExerciseSimulatorControlsProps>
   };
 
   const handleReset = () => {
+    if (onvifMode) {
+      onHardwareHome?.();
+      return;
+    }
     onChangeState((prev) => ({
       ...prev,
       panX: 0,
@@ -55,7 +73,7 @@ export const ExerciseSimulatorControls: React.FC<ExerciseSimulatorControlsProps>
       <div className="flex items-center justify-between pb-2 border-b border-slate-800 mb-2.5">
         <div className="flex items-center gap-1.5 font-mono font-bold text-sky-400">
           <Sliders className="w-3.5 h-3.5" />
-          <span>Camera PTZ Simulator</span>
+          <span>{onvifMode ? 'ONVIF Camera PTZ' : 'Camera PTZ Simulator'}</span>
         </div>
         <button
           onClick={onClose}
@@ -70,9 +88,7 @@ export const ExerciseSimulatorControls: React.FC<ExerciseSimulatorControlsProps>
         <div>
           <div className="text-[10px] text-slate-400 font-mono uppercase tracking-wider mb-1.5 flex justify-between">
             <span>Pan / Tilt Control</span>
-            <span className="text-sky-300">
-              X:{Math.round(state.panX)} Y:{Math.round(state.tiltY)}
-            </span>
+            <span className="text-sky-300">{onvifMode ? 'ONVIF PTZ' : `X:${Math.round(state.panX)} Y:${Math.round(state.tiltY)}`}</span>
           </div>
 
           <div className="grid grid-cols-3 gap-1.5 w-32 mx-auto">
@@ -123,8 +139,8 @@ export const ExerciseSimulatorControls: React.FC<ExerciseSimulatorControlsProps>
         {/* Zoom Slider */}
         <div>
           <div className="flex justify-between text-[11px] font-mono mb-1">
-            <span className="text-slate-400">Optical Zoom</span>
-            <span className="text-sky-400 font-bold">{state.zoom.toFixed(2)}x</span>
+            <span className="text-slate-400">{onvifMode ? 'Remote Zoom Control' : 'Optical Zoom'}</span>
+            <span className="text-sky-400 font-bold">{onvifMode ? 'ONVIF' : `${state.zoom.toFixed(2)}x`}</span>
           </div>
           <input
             type="range"
@@ -132,15 +148,20 @@ export const ExerciseSimulatorControls: React.FC<ExerciseSimulatorControlsProps>
             max="1.8"
             step="0.05"
             value={state.zoom}
-            onChange={(e) =>
-              onChangeState((prev) => ({ ...prev, zoom: parseFloat(e.target.value) }))
-            }
+            onChange={(e) => {
+              const nextZoom = parseFloat(e.target.value);
+              if (onvifMode) onHardwareZoom?.(nextZoom - state.zoom);
+              onChangeState((prev) => ({ ...prev, zoom: nextZoom }));
+            }}
+            onPointerUp={onvifMode ? onHardwareStop : undefined}
+            onMouseUp={onvifMode ? onHardwareStop : undefined}
+            onTouchEnd={onvifMode ? onHardwareStop : undefined}
             className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
           />
         </div>
 
         {/* Camera Jitter (Shake) */}
-        <div>
+        {!onvifMode && <div>
           <div className="flex justify-between text-[11px] font-mono mb-1">
             <span className="text-slate-400">Vibration / Shake</span>
             <span className="text-amber-400 font-bold">{Math.round(state.jitter * 100)}%</span>
@@ -156,10 +177,10 @@ export const ExerciseSimulatorControls: React.FC<ExerciseSimulatorControlsProps>
             }
             className="w-full accent-amber-400 h-1.5 bg-slate-800 rounded"
           />
-        </div>
+        </div>}
 
         {/* Quick Toggles */}
-        <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2">
+        {!onvifMode && <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2">
           {/* Auto Patrol Mode */}
           <button
             onClick={() =>
@@ -189,7 +210,7 @@ export const ExerciseSimulatorControls: React.FC<ExerciseSimulatorControlsProps>
             <Flame className="w-3 h-3" />
             <span>FLIR: {state.flirThermal ? 'ON' : 'OFF'}</span>
           </button>
-        </div>
+        </div>}
       </div>
     </div>
   );
