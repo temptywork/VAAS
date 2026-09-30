@@ -9,7 +9,7 @@ import {
   VideoSourceType,
 } from '../types';
 import { FEATURE_LIBRARY } from '../data/featureDefinitions';
-import { projectPoint, invertHomography } from '../cv/homography';
+import { containRect, displayToNormalized, normalizedToDisplay } from '../cv/frameGeometry';
 import { VisualRegistrationEngine } from '../cv/registrationEngine';
 import { ExerciseTerrainRenderer, renderInputFrame, SimulatorCameraState } from './ExerciseTerrainRenderer';
 import {
@@ -30,6 +30,7 @@ interface TacticalCanvasProps {
   boundary?: BoundaryPoint[];
   boundaryConfig?: BoundaryConfig;
   activeBoundaryConfig?: BoundaryConfig;
+  activeBoundaryViewId?: string;
   activeBoundaryPoints: BoundaryPoint[];
   isDrawingBoundary: boolean;
   pendingFeatureType: string | null;
@@ -58,6 +59,7 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
   boundary = [],
   boundaryConfig,
   activeBoundaryConfig,
+  activeBoundaryViewId,
   activeBoundaryPoints,
   isDrawingBoundary,
   pendingFeatureType,
@@ -85,13 +87,11 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
   const [isHoveringFeature, setIsHoveringFeature] = useState(false);
 
-  // Setup offscreen canvas for CV frame extraction (standardized e.g. 640x360 for fast 30+ fps CV)
-  useEffect(() => {
-    const offscreen = document.createElement('canvas');
-    offscreen.width = 640;
-    offscreen.height = 360;
-    offscreenCanvasRef.current = offscreen;
-  }, []);
+  const getDisplayRect = (width: number, height: number) => {
+    const size = registrationSetup && setupSnapshot ? engine.getViewSize(setupActiveViewId || undefined)
+      : sourceType === 'simulator' ? [640, 360] : [videoElement?.videoWidth || 640, videoElement?.videoHeight || 360];
+    return containRect(size[0], size[1], width, height);
+  };
 
   // Main Render Loop
   useEffect(() => {
@@ -108,15 +108,9 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
 
       const width = canvas.width;
       const height = canvas.height;
-      const cvScale = sourceType === 'simulator' ? 1 : Math.min(width / 640, height / 360);
-      const cvWidth = sourceType === 'simulator' ? width : 640 * cvScale;
-      const cvHeight = sourceType === 'simulator' ? height : 360 * cvScale;
-      const cvLeft = (width - cvWidth) / 2;
-      const cvTop = (height - cvHeight) / 2;
-      const cvToCanvas = (x: number, y: number): [number, number] => [
-        cvLeft + (x / 640) * cvWidth,
-        cvTop + (y / 360) * cvHeight,
-      ];
+      const displayRect = getDisplayRect(width, height);
+      const [cvW, cvH] = engine.getFrameSize();
+      const cvToCanvas = (x: number, y: number): [number, number] => normalizedToDisplay(x/cvW, y/cvH, displayRect);
 
       // Freeze the selected setup frame while placing anchors.
       if (registrationSetup && setupSnapshot) {
@@ -219,33 +213,12 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
         ctx.restore();
       }
 
-      // Helper function to project a point from Reference Canvas (1280x720 baseline) to Current Screen
-      const transformCoord = (refX: number, refY: number): [number, number] => {
-        // Normalize ref coordinates to 640x360 CV space
-        const normRefX = (refX / width) * 640;
-        const normRefY = (refY / height) * 360;
-        const [projX, projY] = H ? projectPoint(H, normRefX, normRefY) : [normRefX, normRefY];
-        return cvToCanvas(projX, projY);
-      };
-
-      const matchedView = engine.getCurrentMatchedView();
       const transformFeatureCoord = (feature: ExerciseFeature): [number, number] | null => {
-        const viewId = feature.anchorViewId || engine.getAnchorViewId();
-        if (registrationSetup) {
-          return feature.anchorViewId === setupActiveViewId && Boolean(setupSnapshot)
-            ? cvToCanvas((feature.x / width) * 640, (feature.y / height) * 360)
-            : null;
-        }
-        let featureHomography = engine.getHomography();
-        if (engine.isIndependentView(viewId)) {
-          if (matchedView.id !== viewId || !matchedView.homography) return null;
-          featureHomography = matchedView.homography;
-        } else if (matchedView.independent) {
-          return null;
-        }
-        if (!featureHomography) return null;
-        const [x, y] = projectPoint(featureHomography, (feature.x / width) * 640, (feature.y / height) * 360);
-        return cvToCanvas(x, y);
+        const point = registrationSetup
+          ? feature.anchorViewId === setupActiveViewId && setupSnapshot ? [feature.x, feature.y] as [number, number] : null
+          : engine.projectAnchor(feature.anchorViewId, feature.x, feature.y);
+        if (!point || point[0]<0 || point[0]>1 || point[1]<0 || point[1]>1) return null;
+        return normalizedToDisplay(point[0], point[1], displayRect);
       };
 
 function hexToRgba(hex: string, alpha: number) {
@@ -260,7 +233,7 @@ function hexToRgba(hex: string, alpha: number) {
 }
 
       // 4. Draw Exercise Boundaries (Supports multiple layers, custom colors, thickness, closed areas, and labels)
-      if (!registrationSetup && !matchedView.independent && overlaySettings.showBoundary && isMasterLayersVisible) {
+      if (!registrationSetup && overlaySettings.showBoundary && isMasterLayersVisible) {
         const renderBoundaryLayer = (
           pts: BoundaryPoint[],
           color: string,
@@ -268,21 +241,26 @@ function hexToRgba(hex: string, alpha: number) {
           name: string,
           isClosed: boolean,
           fillOpacity: number,
-          isBeingDrawn: boolean = false
+          isBeingDrawn: boolean = false,
+          viewId?: string
         ) => {
           if (pts.length === 0) return;
+          const normalized = pts.map(([x,y]) => engine.projectAnchor(viewId,x,y));
+          if (normalized.some(p => !p || !p.every(Number.isFinite))) return;
+          const projected = normalized.map(p => normalizedToDisplay(p![0],p![1],displayRect));
 
           ctx.save();
+          ctx.beginPath(); ctx.rect(displayRect.x,displayRect.y,displayRect.width,displayRect.height); ctx.clip();
           ctx.strokeStyle = color;
           ctx.lineWidth = thickness;
           ctx.setLineDash([10, 5]);
 
           ctx.beginPath();
-          const p0 = transformCoord(pts[0][0], pts[0][1]);
+          const p0 = projected[0];
           ctx.moveTo(p0[0], p0[1]);
 
           for (let i = 1; i < pts.length; i++) {
-            const pt = transformCoord(pts[i][0], pts[i][1]);
+            const pt = projected[i];
             ctx.lineTo(pt[0], pt[1]);
           }
 
@@ -309,7 +287,7 @@ function hexToRgba(hex: string, alpha: number) {
           ctx.strokeStyle = '#ffffff';
           ctx.lineWidth = 1.5;
           for (let i = 0; i < pts.length; i++) {
-            const pt = transformCoord(pts[i][0], pts[i][1]);
+            const pt = projected[i];
             ctx.beginPath();
             ctx.arc(pt[0], pt[1], Math.max(3.5, thickness * 1.0), 0, Math.PI * 2);
             ctx.fill();
@@ -319,8 +297,8 @@ function hexToRgba(hex: string, alpha: number) {
           // Boundary Tactical Label Badge
           if (pts.length >= 2 && name && name.trim()) {
             const midIdx = Math.floor(pts.length / 2);
-            const pA = transformCoord(pts[midIdx - 1][0], pts[midIdx - 1][1]);
-            const pB = transformCoord(pts[midIdx][0], pts[midIdx][1]);
+            const pA = projected[midIdx - 1];
+            const pB = projected[midIdx];
             const labelX = (pA[0] + pB[0]) / 2;
             const labelY = (pA[1] + pB[1]) / 2 - 14;
 
@@ -355,7 +333,7 @@ function hexToRgba(hex: string, alpha: number) {
               b.name || 'BOUNDARY',
               Boolean(b.isClosed),
               b.fillOpacity || 0,
-              false
+              false, b.anchorViewId
             );
           });
         } else if (boundary && boundary.length > 0 && !isDrawingBoundary) {
@@ -380,7 +358,7 @@ function hexToRgba(hex: string, alpha: number) {
             activeBoundaryConfig?.name || 'NEW BOUNDARY',
             false,
             0,
-            true
+            true, activeBoundaryViewId
           );
         }
       }
@@ -620,9 +598,9 @@ function hexToRgba(hex: string, alpha: number) {
         ctx.font = 'bold 13px monospace';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('⚠ REGISTRATION LOST • OVERLAYS FROZEN', width / 2, 40);
+        ctx.fillText('⚠ ANCHOR POSITION UNCERTAIN', width / 2, 40);
         ctx.font = '11px monospace';
-        ctx.fillText('Set Current View as Reference to Re-anchor', width / 2, 54);
+        ctx.fillText('Return to a saved view or check camera telemetry', width / 2, 54);
         ctx.restore();
       }
 
@@ -660,6 +638,10 @@ function hexToRgba(hex: string, alpha: number) {
     simState,
     features,
     boundary,
+    boundaries,
+    boundaryConfig,
+    activeBoundaryConfig,
+    activeBoundaryViewId,
     activeBoundaryPoints,
     isDrawingBoundary,
     pendingFeatureType,
@@ -693,128 +675,39 @@ function hexToRgba(hex: string, alpha: number) {
     return () => ro.disconnect();
   }, []);
 
-  // Canvas Click Handler: Inverts current screen click back to Reference Coordinates
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const screenX = e.clientX - rect.x;
-    const screenY = e.clientY - rect.y;
-    const displayScale = sourceType === 'simulator' ? 1 : Math.min(canvas.width / 640, canvas.height / 360);
-    const displayWidth = sourceType === 'simulator' ? canvas.width : 640 * displayScale;
-    const displayHeight = sourceType === 'simulator' ? canvas.height : 360 * displayScale;
-    const displayLeft = (canvas.width - displayWidth) / 2;
-    const displayTop = (canvas.height - displayHeight) / 2;
-    const currentX = ((screenX - displayLeft) / displayWidth) * 640;
-    const currentY = ((screenY - displayTop) / displayHeight) * 360;
-
-    if (registrationSetup) {
-      if (pendingFeatureType && setupActiveViewId && setupSnapshot && currentX >= 0 && currentX <= 640 && currentY >= 0 && currentY <= 360) {
-        onAddFeaturePoint([(currentX / 640) * canvas.width, (currentY / 360) * canvas.height]);
-      }
-      return;
-    }
-
-    const currentMatch = engine.getCurrentMatchedView();
-    const H = currentMatch.independent ? currentMatch.homography : engine.getHomography();
-    const invH = H ? invertHomography(H) : null;
-
-    // Convert Screen (width x height) to CV 640x360 normalized coordinates
-    const normCurX = currentX;
-    const normCurY = currentY;
-
-    let refCoordX = screenX;
-    let refCoordY = screenY;
-
-    if (invH) {
-      const [invX, invY] = projectPoint(invH, normCurX, normCurY);
-      refCoordX = (invX / 640) * canvas.width;
-      refCoordY = (invY / 360) * canvas.height;
-    }
-
-    // If placing a new feature:
-    if (pendingFeatureType) {
-      onAddFeaturePoint([refCoordX, refCoordY]);
-      return;
-    }
-
-    // If drawing boundary:
-    if (isDrawingBoundary) {
-      onAddBoundaryPoint([refCoordX, refCoordY]);
-      return;
-    }
-
-    // Otherwise, check if user clicked an existing feature to select it (only if features are currently visible)
-    let clickedFeature: ExerciseFeature | null = null;
-    const isMasterVisible = overlaySettings.showAllLayers !== false && overlaySettings.showSymbols !== false;
-    if (isMasterVisible) {
-      for (let i = features.length - 1; i >= 0; i--) {
-        const feat = features[i];
-        if (!feat.visible) continue;
-        const viewId = feat.anchorViewId || engine.getAnchorViewId();
-        const independent = engine.isIndependentView(viewId);
-        if (independent && viewId !== currentMatch.id) continue;
-        if (!independent && currentMatch.independent) continue;
-        const featureHomography = independent ? currentMatch.homography : engine.getHomography();
-        if (!featureHomography) continue;
-        const [px, py] = projectPoint(featureHomography, (feat.x / canvas.width) * 640, (feat.y / canvas.height) * 360);
-        const featScreenX = displayLeft + (px / 640) * displayWidth;
-        const featScreenY = displayTop + (py / 360) * displayHeight;
-        const dist = Math.hypot(screenX - featScreenX, screenY - featScreenY);
-        if (dist <= 24) {
-          clickedFeature = feat;
-          break;
-        }
-      }
-    }
-
-    onSelectFeature(clickedFeature);
+  const screenPoint = (event: React.MouseEvent<HTMLCanvasElement>): [number,number] => {
+    const canvas=canvasRef.current!,rect=canvas.getBoundingClientRect();
+    return [(event.clientX-rect.left)*canvas.width/rect.width,(event.clientY-rect.top)*canvas.height/rect.height];
   };
-
-  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.x;
-    const y = e.clientY - rect.y;
-    setMousePos({ x, y });
-    const displayScale = sourceType === 'simulator' ? 1 : Math.min(canvas.width / 640, canvas.height / 360);
-    const displayWidth = sourceType === 'simulator' ? canvas.width : 640 * displayScale;
-    const displayHeight = sourceType === 'simulator' ? canvas.height : 360 * displayScale;
-    const displayLeft = (canvas.width - displayWidth) / 2;
-    const displayTop = (canvas.height - displayHeight) / 2;
-
-    // Check hover
-    let isNear = false;
-    const isMasterVisible = overlaySettings.showAllLayers !== false && overlaySettings.showSymbols !== false;
-    if (isMasterVisible) {
-        const currentMatch = engine.getCurrentMatchedView();
-        for (const feat of features) {
-          if (!feat.visible) continue;
-          const viewId = feat.anchorViewId || engine.getAnchorViewId();
-          const independent = engine.isIndependentView(viewId);
-          if (independent && viewId !== currentMatch.id) continue;
-          if (!independent && currentMatch.independent) continue;
-          const featureHomography = independent ? currentMatch.homography : engine.getHomography();
-          if (!featureHomography) continue;
-          let fx = feat.x;
-          let fy = feat.y;
-          {
-            const [px, py] = projectPoint(
-              featureHomography,
-            (feat.x / canvas.width) * 640,
-            (feat.y / canvas.height) * 360
-          );
-          fx = displayLeft + (px / 640) * displayWidth;
-          fy = displayTop + (py / 360) * displayHeight;
-        }
-        if (Math.hypot(x - fx, y - fy) <= 24) {
-          isNear = true;
-          break;
-        }
-      }
+  const findFeature = (x:number,y:number) => {
+    if(overlaySettings.showAllLayers===false||overlaySettings.showSymbols===false)return null;
+    const canvas=canvasRef.current!,rect=getDisplayRect(canvas.width,canvas.height);
+    for(const feature of [...features].reverse()) {
+      if(!feature.visible)continue;
+      const p=engine.projectAnchor(feature.anchorViewId,feature.x,feature.y);
+      if(!p||p[0]<0||p[0]>1||p[1]<0||p[1]>1)continue;
+      const q=normalizedToDisplay(p[0],p[1],rect);
+      if(Math.hypot(x-q[0],y-q[1])<24)return feature;
     }
-    setIsHoveringFeature(isNear);
+    return null;
+  };
+  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas=canvasRef.current;if(!canvas)return;
+    const [x,y]=screenPoint(e),p=displayToNormalized(x,y,getDisplayRect(canvas.width,canvas.height));
+    if(!p)return;
+    if(registrationSetup){
+      if(pendingFeatureType&&setupActiveViewId&&setupSnapshot)onAddFeaturePoint(p);
+      return;
+    }
+    const viewId=isDrawingBoundary?activeBoundaryViewId||engine.getAnchorViewId():engine.getCurrentMatchedView().id||engine.getAnchorViewId();
+    const ref=engine.unprojectAnchor(viewId,p[0],p[1]);
+    if(pendingFeatureType){if(ref)onAddFeaturePoint(ref);return;}
+    if(isDrawingBoundary){if(ref)onAddBoundaryPoint(ref);return;}
+    onSelectFeature(findFeature(x,y));
+  };
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if(!canvasRef.current)return;
+    const [x,y]=screenPoint(e);setMousePos({x,y});setIsHoveringFeature(Boolean(findFeature(x,y)));
   };
 
   const selectedFeature = features.find((f) => f.id === selectedFeatureId);
@@ -939,7 +832,7 @@ function hexToRgba(hex: string, alpha: number) {
 
             <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
               <span className="text-[10px] text-slate-400 font-mono">
-                Ref: X:{Math.round(selectedFeature.x)} Y:{Math.round(selectedFeature.y)}
+                Ref: X:{(selectedFeature.x * 100).toFixed(1)} Y:{(selectedFeature.y * 100).toFixed(1)}
               </span>
               <button
                 onClick={() => onDeleteFeature(selectedFeature.id)}

@@ -32,6 +32,8 @@ export const OnvifSetupModal: React.FC<OnvifSetupModalProps> = ({
   if (!isOpen) return null;
 
   const update = (patch: Partial<OnvifCameraConfig>) => onChange({ ...config, ...patch });
+  const selected=profiles.find(p=>p.token===config.profileToken)||profiles[0];
+  const unsupported=(config.transport||'webrtc')==='webrtc'&&selected?.encoding!=='H264';
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/85 p-4 backdrop-blur-sm">
@@ -49,7 +51,7 @@ export const OnvifSetupModal: React.FC<OnvifSetupModalProps> = ({
           </button>
         </header>
 
-        <div className="space-y-4 p-4">
+        <div className="max-h-[70vh] overflow-y-auto space-y-4 p-4">
           <div className="grid grid-cols-[minmax(0,1fr)_96px_96px] gap-3">
             <label className="text-xs text-slate-300">
               Camera address
@@ -134,7 +136,7 @@ export const OnvifSetupModal: React.FC<OnvifSetupModalProps> = ({
           <label className="block text-xs text-slate-300">
             Video stream profile
             <select
-              value={config.profileToken || ''}
+              value={config.profileToken || selected?.token || ''}
               onChange={(event) => update({ profileToken: event.target.value || undefined })}
               disabled={!profiles.length}
               className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-sky-500 disabled:text-slate-500"
@@ -146,6 +148,24 @@ export const OnvifSetupModal: React.FC<OnvifSetupModalProps> = ({
               )) : <option value="">Discover camera profiles first</option>}
             </select>
           </label>
+
+          <label className="block text-xs text-slate-300">Playback
+            <select value={config.transport || 'webrtc'} onChange={e=>update({transport:e.target.value as 'webrtc'|'hls'})} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 p-2">
+              <option value="webrtc">WebRTC — low delay, no FFmpeg</option>
+              <option value="hls">HLS — compatibility fallback, requires FFmpeg</option>
+            </select>
+          </label>
+          <p className="text-xs text-slate-400">WebRTC uses the local video gateway and a standard H.264 camera profile. Once video is playing, choose Calibrate PTZ Anchoring to measure camera movement and zoom.</p>
+          {selected&&<div className="rounded border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+            <p>Reported stream: {selected.width||'?'}×{selected.height||'?'} · {selected.frameRate||'?'} fps · {selected.bitrate||'?'} kbps</p>
+            <p className="mt-1">Encoding: {selected.encoding}{selected.h264Profile?` (${selected.h264Profile})`:''} · Keyframe interval: {selected.keyframeInterval||'?'} frames</p>
+            <p className="mt-1">PTZ position units: {selected.ptz?.panTiltSpace?.includes('Spherical')?'degrees':'normalized or unspecified'}</p>
+            {selected.ptz&&<p className="mt-1">Pan: {selected.ptz.panRange?.join(' to ')||'not reported'} · Tilt: {selected.ptz.tiltRange?.join(' to ')||'not reported'} · Zoom: {selected.ptz.zoomRange?.join(' to ')||'not reported'}</p>}
+            {selected.crop&&<p className="mt-1">Source bounds: {selected.crop.width}×{selected.crop.height} at {selected.crop.x},{selected.crop.y}</p>}
+            <p className="mt-2">Decoded image dimensions determine processing and aspect ratio. Calibrate each profile separately; setup views retain their camera position.</p>
+          </div>}
+          {unsupported&&<p className="text-xs text-amber-300">Select an H.264 profile for WebRTC, or choose HLS playback for this stream encoding.</p>}
+
 
           {error && <div className="rounded border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-200">{error}</div>}
 
@@ -166,7 +186,7 @@ export const OnvifSetupModal: React.FC<OnvifSetupModalProps> = ({
             <button
               type="button"
               onClick={onSaveAndConnect}
-              disabled={isBusy || profiles.length === 0 || !config.host.trim()}
+              disabled={isBusy || profiles.length === 0 || !config.host.trim() || unsupported}
               className="rounded border border-emerald-500/60 bg-emerald-500/15 px-3 py-2 text-xs font-bold text-emerald-200 hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Save &amp; Connect

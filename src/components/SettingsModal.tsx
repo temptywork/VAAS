@@ -1,3 +1,4 @@
+import { REGISTRATION_DEFAULTS } from '../cv/registrationDefaults';
 import React, { useState } from 'react';
 import { CameraConfig, OverlaySettings, RegistrationSettings, VideoSourceType } from '../types';
 import {
@@ -193,7 +194,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <input
                     type="range"
                     min="100"
-                    max="400"
+                    max="1000"
                     step="20"
                     value={regSettings.maxFeatures}
                     onChange={(e) =>
@@ -278,21 +279,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
                   />
                   <span className="text-[10px] text-slate-500 block mt-0.5">
-                    Threshold for GOOD registration state (PRD recommends ≥ 8, higher = stricter lock).
+                    Minimum supported visual matches. Fresh calibrated PTZ can position anchors even when visual support is lower.
                   </span>
                 </div>
 
                 <div>
                   <div className="flex justify-between text-[11px] font-mono mb-1">
                     <span className="text-slate-400">RANSAC Iteration Trials</span>
-                    <span className="text-emerald-400 font-bold">{regSettings.ransacIterations ?? 300} cycles</span>
+                    <span className="text-emerald-400 font-bold">{regSettings.ransacIterations ?? REGISTRATION_DEFAULTS.ransacIterations} cycles</span>
                   </div>
                   <input
                     type="range"
                     min="60"
                     max="320"
                     step="20"
-                    value={regSettings.ransacIterations ?? 300}
+                    value={regSettings.ransacIterations ?? REGISTRATION_DEFAULTS.ransacIterations}
                     onChange={(e) =>
                       onUpdateRegSettings({
                         ...regSettings,
@@ -310,7 +311,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <div className="flex justify-between text-[11px] font-mono mb-1">
                     <span className="text-slate-400">Weak-Frame Recovery Grace</span>
                     <span className="text-emerald-400 font-bold">
-                      {regSettings.lostFrameToleranceFrames ?? 12} frames
+                      {regSettings.lostFrameToleranceFrames ?? REGISTRATION_DEFAULTS.lostFrameToleranceFrames} frames
                     </span>
                   </div>
                   <input
@@ -318,7 +319,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     min="0"
                     max="30"
                     step="2"
-                    value={regSettings.lostFrameToleranceFrames ?? 12}
+                    value={regSettings.lostFrameToleranceFrames ?? REGISTRATION_DEFAULTS.lostFrameToleranceFrames}
                     onChange={(e) => onUpdateRegSettings({
                       ...regSettings,
                       lostFrameToleranceFrames: parseInt(e.target.value),
@@ -326,21 +327,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     className="w-full accent-emerald-400 h-1.5 bg-slate-800 rounded"
                   />
                   <span className="text-[10px] text-slate-500 block mt-0.5">
-                    Holds the last trusted pose through brief dropouts (12 frames is about 0.4 s at 30 FPS).
+                    Grace before reporting lost visual registration. The stale-transform limit also applies; fresh PTZ projection continues independently.
                   </span>
                 </div>
 
                 <div>
                   <div className="flex justify-between text-[11px] font-mono mb-1">
                     <span className="text-slate-400">Temporal Smoothing Responsiveness (α)</span>
-                    <span className="text-emerald-400 font-bold">{((regSettings.smoothingFactor ?? 0.5) * 100).toFixed(0)}%</span>
+                    <span className="text-emerald-400 font-bold">{((regSettings.smoothingFactor ?? REGISTRATION_DEFAULTS.smoothingFactor) * 100).toFixed(0)}%</span>
                   </div>
                   <input
                     type="range"
                     min="0.20"
                     max="0.95"
                     step="0.05"
-                    value={regSettings.smoothingFactor ?? 0.5}
+                    value={regSettings.smoothingFactor ?? REGISTRATION_DEFAULTS.smoothingFactor}
                     onChange={(e) =>
                       onUpdateRegSettings({
                         ...regSettings,
@@ -350,7 +351,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     className="w-full accent-emerald-400 h-1.5 bg-slate-800 rounded"
                   />
                   <span className="text-[10px] text-slate-500 block mt-0.5">
-                    Lower values (30–50%) filter jitter and micro-shakes; higher values (70–90%) give ultra-fast camera reaction.
+                    Filters visual corrections and visual-only motion. PTZ projection is applied immediately without this filter.
                   </span>
                 </div>
 
@@ -376,6 +377,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </label>
                 </div>
               </div>
+
+              <details className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-xs">
+                <summary className="cursor-pointer text-sky-300">Shared processing and PTZ settings</summary>
+                <p className="my-2 text-slate-400">Applied to every input feed. Pixel thresholds scale from a 960-pixel image long edge. PTZ settings apply when camera telemetry and calibration are available.</p>
+                <div className="grid grid-cols-2 gap-3">
+                  {([
+                    {key:'processingLongEdge',label:'Processing long edge (px)',min:320,max:1280,step:80},
+                    {key:'updateIntervalMs',label:'Frame interval (ms)',min:16,max:250,step:1},
+                    {key:'poseMaxAgeMs',label:'Maximum pose age (ms)',min:100,max:2000,step:50},
+                    {key:'ptzResidualLimitPx',label:'Visual correction limit (px)',min:2,max:80,step:1},
+                    {key:'visualSearchViews',label:'Views searched per frame',min:1,max:8,step:1},
+                    {key:'descriptorIntervalFrames',label:'Descriptor refresh (frames)',min:1,max:30,step:1},
+                    {key:'residualHoldMs',label:'Correction hold (ms)',min:0,max:1000,step:50},
+                    {key:'residualDecayMs',label:'Correction fade (ms)',min:100,max:3000,step:50},
+                    {key:'transformMaxAgeMs',label:'Stale transform limit (ms)',min:100,max:2000,step:50},
+                    {key:'maxAutoKeyframes',label:'Automatic reference limit',min:0,max:24,step:1},
+                  ] as const).map(field=><label key={field.key} className="text-slate-400">{field.label}
+                    <input type="number" min={field.min} max={field.max} step={field.step}
+                      value={regSettings[field.key]??REGISTRATION_DEFAULTS[field.key]}
+                      onChange={e=>onUpdateRegSettings({...regSettings,[field.key]:Number(e.target.value)})}
+                      className="mt-1 w-full rounded border border-slate-700 bg-slate-900 p-1 text-white"/>
+                  </label>)}
+                </div>
+                <label className="my-3 flex gap-2"><input type="checkbox" checked={regSettings.adaptiveReference} onChange={e=>onUpdateRegSettings({...regSettings,adaptiveReference:e.target.checked})}/>Capture automatic visual references during supported motion</label>
+                <button onClick={()=>onUpdateRegSettings({...REGISTRATION_DEFAULTS})} className="text-sky-300 underline">Restore shared defaults</button>
+              </details>
 
               <div className="flex items-center justify-between bg-slate-950/60 p-3 rounded-lg border border-slate-800">
                 <div>

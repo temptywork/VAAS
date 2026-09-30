@@ -15,6 +15,7 @@ export interface SimulatorCameraState {
 }
 
 import type { VideoSourceType } from '../types';
+import { containRect } from '../cv/frameGeometry';
 
 function simulatorShake(state: SimulatorCameraState): [number, number] {
   // Deterministic for a given simulation timestamp so the displayed canvas,
@@ -432,7 +433,11 @@ export function renderInputFrame(
   renderer: ExerciseTerrainRenderer
 ): boolean {
   if (sourceType === 'simulator') {
-    renderer.render(ctx, width, height, simState);
+    const rect = containRect(640,360,width,height);
+    ctx.fillStyle = '#090d16'; ctx.fillRect(0,0,width,height);
+    ctx.save(); ctx.translate(rect.x,rect.y);ctx.beginPath();ctx.rect(0,0,rect.width,rect.height);ctx.clip();
+    renderer.render(ctx, rect.width, rect.height, simState);
+    ctx.restore();
     return true;
   }
   if (videoElement && videoElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {

@@ -1,526 +1,355 @@
-import { CameraPtzPose, RegistrationMetrics, RegistrationQuality, RegistrationSettings } from '../types';
-import {
-  Keypoint,
-  detectFeatures,
-  rgbaToGrayscale,
-} from './featureDetection';
-import { FeatureMatch, matchFeatures } from './matcher';
-import { Homography, estimateHomographyRANSAC, invertHomography, projectPoint } from './homography';
+import type { CameraPtzPose, PtzCalibration, RegistrationMetrics, RegistrationSettings } from '../types';
+import { detectMultiscale, grayPyramid, rgbaToGrayscale, type GrayLevel, type Keypoint } from './featureDetection';
+import { matchFeatures, type FeatureMatch } from './matcher';
+import { estimateHomographyRANSAC, invertHomography, projectPoint, solveHomography4Points, type Homography } from './homography';
+import { IDENTITY, focalAt, imageRay, rayProjector, multiply, projectPtz, ptzHomography } from './ptzProjection';
+import { trackMatches } from './opticalFlow';
+import { fitSimilarity } from './similarity';
+import { REGISTRATION_DEFAULTS, registrationSettings } from './registrationDefaults';
 
-interface RegistrationKeyframe {
-  id: string;
-  independent: boolean;
-  keypoints: Keypoint[];
-  width: number;
-  height: number;
-  /** Maps the original overlay reference coordinates into this keyframe. */
-  anchorToKeyframe: Homography | null;
-  ptzPose?: CameraPtzPose;
+export interface Keyframe {
+  id: string; independent: boolean; keypoints: Keypoint[]; width: number; height: number;
+  anchorToKeyframe: Homography | null; ptzPose?: CameraPtzPose; cameraKey?: string;
+}
+export interface ViewTransform {
+  h: Homography; time: number; mode: 'visual'|'ptz'|'ptz+visual'|'simulator';
+  residual?: Homography; correction?: Homography; residualAt?: number; residualZoom?: number; geometryTag?: string;
+}
+export interface RegistrationState {
+  origin: number; keyframes?: Keyframe[]; transforms: Array<[string,ViewTransform]>;
+  currentId: string | null; keypoints: Keypoint[]; matches: FeatureMatch[]; inliers: FeatureMatch[];
 }
 
-const IDENTITY: Homography = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
-function multiplyHomographies(a: Homography, b: Homography): Homography {
-  const out = new Array<number>(9).fill(0);
-  for (let row = 0; row < 3; row++) {
-    for (let col = 0; col < 3; col++) {
-      for (let k = 0; k < 3; k++) out[row * 3 + col] += a[row * 3 + k] * b[k * 3 + col];
-    }
-  }
-  return out;
-}
-
+/** One engine for all decoded feeds. All public anchor coordinates are normalized source-image coordinates. */
 export class VisualRegistrationEngine {
-  private refGray: Uint8Array | null = null;
-  private refKeypoints: Keypoint[] = [];
-  private refWidth = 0;
-  private refHeight = 0;
-  private refImageDataUrl: string | null = null;
-  private keyframes: RegistrationKeyframe[] = [];
-  private lastKeyframeSearchAt = 0;
-  private keyframeSearchCursor = 1;
-  private activeReferenceId = 'anchor-view-1';
-  private currentMatchedViewId: string | null = null;
-  private currentMatchedViewHomography: Homography | null = null;
-  private currentMatchedViewIndependent = false;
-  private currentPtzPose: CameraPtzPose | null = null;
-
-  private curGrayBuffer: Uint8Array | null = null;
-  private currentMatches: FeatureMatch[] = [];
-  private currentInliers: FeatureMatch[] = [];
+  public settings: RegistrationSettings = { ...REGISTRATION_DEFAULTS };
+  private keyframes: Keyframe[] = [];
+  private transforms = new Map<string, ViewTransform>();
+  private external = new Map<string, Homography>();
+  private referenceImage: string | null = null;
+  private currentId: string | null = null;
+  private width = 640;
+  private height = 360;
   private currentKeypoints: Keypoint[] = [];
+  private currentMatches: FeatureMatch[] = [];
+  private inliers: FeatureMatch[] = [];
+  private previousPyramid: GrayLevel[] | null = null;
+  private tracks = new Map<string, FeatureMatch[]>();
+  private previousPose: CameraPtzPose | null = null;
+  private pose: CameraPtzPose | null = null;
+  private poseAge = Infinity;
+  private cameraKey = '';
+  private calibration: PtzCalibration | null = null;
+  private frameNumber = 0;
+  private searchCursor = 0;
+  private lastGoodAt = 0;
+  private ptzSignature = '';
+  private autoSequence = 0;
+  private referenceVersion=0;
+  private rayCache=new Map<string,Array<number[]|null>>();
+  private fpsAt = performance.now();
+  private fpsFrames = 0;
+  private fps = 0;
 
-  private lastValidHomography: Homography | null = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-  private smoothedHomography: Homography | null = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-  private externalHomography: Homography | null = null;
-  private lastQuality: RegistrationQuality = 'UNINITIALIZED';
-  private consecutiveWeakFrames = 0;
-
-  private frameCount = 0;
-  private lastFpsTime = performance.now();
-  private currentFps = 0;
-
-  public settings: RegistrationSettings = {
-    enabled: true,
-    maxFeatures: 360,
-    fastThreshold: 16,
-    matchRatioThreshold: 0.78,
-    ransacThresholdPx: 4.5,
-    minInliers: 8,
-    ransacIterations: 300,
-    lostFrameToleranceFrames: 12,
-    smoothingFactor: 0.5,
-    leastSquaresRefine: true,
-    adaptiveReference: false,
-    updateIntervalMs: 33, // ~30 FPS
-  };
-
-  /**
-   * Set reference frame from ImageData
-   */
-  public setReferenceFrame(
-    imageData: ImageData,
-    dataUrl?: string,
-    viewId = 'anchor-view-1',
-    ptzPose?: CameraPtzPose
-  ): { keypointCount: number } {
-    const { width, height, data } = imageData;
-    this.refWidth = width;
-    this.refHeight = height;
-
-    this.refGray = new Uint8Array(width * height);
-    rgbaToGrayscale(data, width, height, this.refGray);
-
-    this.refKeypoints = detectFeatures(
-      this.refGray,
-      width,
-      height,
-      this.settings.maxFeatures,
-      this.settings.fastThreshold ?? 16
-    );
-    this.keyframes = [{
-      id: viewId,
-      independent: false,
-      keypoints: this.refKeypoints,
-      width,
-      height,
-      anchorToKeyframe: [...IDENTITY],
-      ptzPose,
-    }];
-    this.lastKeyframeSearchAt = 0;
-    this.keyframeSearchCursor = 1;
-    this.activeReferenceId = viewId;
-    this.currentMatchedViewId = viewId;
-    this.currentMatchedViewHomography = [...IDENTITY];
-
-    if (dataUrl) {
-      this.refImageDataUrl = dataUrl;
+  configurePtz(calibration: PtzCalibration | null, cameraKey: string) {
+    const signature=JSON.stringify([cameraKey,calibration]);
+    if (this.ptzSignature !== signature) {
+      this.ptzSignature=signature;this.rayCache.clear();
+      this.transforms.clear(); this.tracks.clear(); this.previousPose = null;
     }
-
-    // Reset homography to identity
-    this.lastValidHomography = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-    this.smoothedHomography = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-    this.externalHomography = null;
-    this.consecutiveWeakFrames = 0;
-    this.lastQuality = this.refKeypoints.length >= 4 ? 'GOOD' : 'DEGRADED';
-    this.currentMatches = [];
-    this.currentInliers = [];
-
-    return { keypointCount: this.refKeypoints.length };
+    this.calibration = calibration; this.cameraKey = cameraKey;
   }
-
-  /** Add a manually captured setup view. It has its own local coordinate frame. */
-  public addSetupKeyframe(imageData: ImageData, viewId: string, dataUrl?: string, ptzPose?: CameraPtzPose): number {
-    if (!this.refGray) {
-      const result = this.setReferenceFrame(imageData, dataUrl, viewId, ptzPose);
-      return result.keypointCount;
+  setCameraPoseHint(pose: CameraPtzPose | null) { this.pose = pose; }
+  setFramePose(pose: CameraPtzPose | null, ageMs = Infinity) { this.pose = pose; this.poseAge = ageMs; }
+  getFrameSize(): [number,number] { return [this.width,this.height]; }
+  getViewSize(id?: string): [number,number] {
+    const k=this.keyframes.find(k=>k.id===(id||this.getAnchorViewId())); return k?[k.width,k.height]:[this.width,this.height];
+  }
+  getAnchorViewId() { return this.keyframes[0]?.id || 'anchor-view-1'; }
+  isIndependentView(id: string) { return this.keyframes.some(k=>k.id===id&&k.independent); }
+  getReferenceImage() { return this.referenceImage; }
+  getReferenceKeypoints() { return this.keyframes[0]?.keypoints || []; }
+  getCurrentKeypoints() { return this.currentKeypoints; }
+  getInliers() { return this.inliers; }
+  getMatches() { return this.currentMatches; }
+  getCurrentMatchedView() {
+    const id=this.currentId || this.getAnchorViewId();
+    return { id, homography: this.getViewHomography(id), independent: this.isIndependentView(id) };
+  }
+  getHomography() { return this.getViewHomography(this.getAnchorViewId()); }
+  getProjectionMode():RegistrationMetrics['mode'] {
+    if(this.external.size)return 'simulator';
+    const id=this.currentId||this.getAnchorViewId(),k=this.keyframes.find(k=>k.id===id),t=this.transforms.get(id);
+    if(!t||!this.getViewHomography(id))return 'uncertain';
+    if(t.mode.startsWith('ptz')&&(!k||!this.canPredict(k)))return 'uncertain';
+    return t.mode;
+  }
+  getViewHomography(id: string): Homography | null {
+    if (!this.settings.enabled) {
+      const k=this.keyframes.find(k=>k.id===id);
+      return k?[this.width/k.width,0,0,0,this.height/k.height,0,0,0,1]:null;
     }
-    const { width, height, data } = imageData;
-    const gray = new Uint8Array(width * height);
-    rgbaToGrayscale(data, width, height, gray);
-    const keypoints = detectFeatures(gray, width, height, this.settings.maxFeatures, this.settings.fastThreshold ?? 16);
-    this.keyframes = this.keyframes.filter((frame) => frame.id !== viewId);
-    this.keyframes.push({ id: viewId, independent: true, keypoints, width, height, anchorToKeyframe: null, ptzPose });
-    if (this.keyframes.length > 24) this.evictOldestNonAnchorView();
+    if (this.external.has(id)) return this.external.get(id)!;
+    const t=this.transforms.get(id);
+    return t && performance.now()-t.time<(this.settings.transformMaxAgeMs??500) ? t.h : null;
+  }
+  setExternalHomography(h: Homography | null) {
+    if(h) this.external.set(this.getAnchorViewId(),h); else this.external.clear();
+  }
+  setExternalViews(views: Map<string,Homography>) { this.external=views; }
+  hasExternalGeometry(){return this.external.size>0;}
+  getTrackingHint():string|undefined {
+    if(!this.cameraKey)return undefined;
+    if(!this.calibration?.validated)return 'Calibrate PTZ to enable positioning from camera telemetry';
+    if(!this.pose||this.poseAge>(this.settings.poseMaxAgeMs??400))return 'Camera position data is stale; using visual registration';
+    if(Math.abs(this.width/this.height-this.calibration.aspect)>.02)return 'Image geometry changed; update PTZ calibration';
+    if(!focalAt(this.pose.zoom,this.calibration))return 'Zoom is outside the calibrated range; using visual registration';
+    return undefined;
+  }
+  private canPredict(k:Keyframe): boolean {
+    const c=this.calibration;
+    return !!(c?.validated && c.cameraKey===this.cameraKey && k.cameraKey===this.cameraKey && k.ptzPose && this.pose &&
+      this.poseAge <= (this.settings.poseMaxAgeMs ?? 400) &&
+      (!k.ptzPose.panTiltSpace || !this.pose.panTiltSpace || k.ptzPose.panTiltSpace===this.pose.panTiltSpace) &&
+      (!k.ptzPose.zoomSpace || !this.pose.zoomSpace || k.ptzPose.zoomSpace===this.pose.zoomSpace) && Math.abs(this.width/this.height-c.aspect)<0.02 && Math.abs(k.width/k.height-c.aspect)<0.02);
+  }
+  projectAnchor(id: string | undefined, x:number,y:number):[number,number]|null {
+    const viewId=id||this.getAnchorViewId(), k=this.keyframes.find(k=>k.id===viewId);
+    if(!k) return null;
+    const h=this.getViewHomography(viewId); if(!h) return null;
+    const t=this.transforms.get(viewId);
+    if(this.settings.enabled && !this.external.has(viewId) && t?.mode.startsWith('ptz') && this.canPredict(k)) {
+      const p=projectPtz(x,y,k.ptzPose!,this.pose!,this.calibration!,k.width/k.height,this.width/this.height);
+      if(!p) return null;
+      const q=projectPoint(t.residual||IDENTITY,p[0]*this.width,p[1]*this.height);
+      return [q[0]/this.width,q[1]/this.height];
+    }
+    const px=x*k.width,py=y*k.height;
+    if(h[6]*px+h[7]*py+h[8]<=0.001) return null;
+    const p=projectPoint(h,px,py);
+    return p.every(Number.isFinite)?[p[0]/this.width,p[1]/this.height]:null;
+  }
+  unprojectAnchor(id:string,x:number,y:number):[number,number]|null {
+    const k=this.keyframes.find(k=>k.id===id),t=this.transforms.get(id),h=this.getViewHomography(id);
+    if(!k||!h) return null;
+    if(!this.external.has(id)&&t?.mode.startsWith('ptz')&&this.canPredict(k)){
+      const inv=invertHomography(t.residual||IDENTITY);if(!inv)return null;
+      const p=projectPoint(inv,x*this.width,y*this.height);
+      return projectPtz(p[0]/this.width,p[1]/this.height,this.pose!,k.ptzPose!,this.calibration!,this.width/this.height,k.width/k.height);
+    }
+    const inv=invertHomography(h);if(!inv)return null;
+    const p=projectPoint(inv,x*this.width,y*this.height);return [p[0]/k.width,p[1]/k.height];
+  }
+  setReferenceFrame(image: ImageData,dataUrl?:string,id='anchor-view-1',pose?:CameraPtzPose,cameraKey?:string) {
+    this.reset(); this.width=image.width; this.height=image.height;
+    const count=this.addSetupKeyframe(image,id,dataUrl,pose,cameraKey);
+    return {keypointCount:count};
+  }
+  addSetupKeyframe(image:ImageData,id:string,dataUrl?:string,pose?:CameraPtzPose,cameraKey?:string) {
+    const gray=new Uint8Array(image.width*image.height);
+    rgbaToGrayscale(image.data,image.width,image.height,gray);
+    const keypoints=detectMultiscale(grayPyramid(gray,image.width,image.height),this.settings.maxFeatures,this.settings.fastThreshold);
+    const index=this.keyframes.findIndex(k=>k.id===id);
+    const independent=index>=0?this.keyframes[index].independent:this.keyframes.length>0;
+    const frame={id,independent,keypoints,width:image.width,height:image.height,ptzPose:pose,cameraKey,
+      anchorToKeyframe:independent?null:[...IDENTITY]};
+    if(index>=0)this.keyframes[index]=frame;else this.keyframes.push(frame);
+    this.referenceVersion++;this.rayCache.clear();
+    // Automatically captured views depend on the root geometry and cannot survive rebasing it.
+    if(index===0)this.keyframes=this.keyframes.filter(k=>!k.id.startsWith('auto-'));
+    this.transforms.clear();this.external.clear();this.tracks.clear();this.previousPyramid=null;this.previousPose=null;
+    if(!independent){this.referenceImage=dataUrl||null;this.width=image.width;this.height=image.height;}
+    this.currentId=id;
+    this.transforms.set(id,{h:[...IDENTITY],time:performance.now(),mode:'visual'});
     return keypoints.length;
   }
-
-  public getCurrentMatchedView(): { id: string | null; homography: Homography | null; independent: boolean } {
-    return { id: this.currentMatchedViewId, homography: this.currentMatchedViewHomography, independent: this.currentMatchedViewIndependent };
+  reset() {
+    this.referenceVersion++;this.rayCache.clear();
+    this.keyframes=[];this.transforms.clear();this.external.clear();this.referenceImage=null;this.currentId=null;
+    this.tracks.clear();this.previousPyramid=null;this.previousPose=null;this.inliers=[];this.currentMatches=[];this.currentKeypoints=[];
+    this.lastGoodAt=0;this.frameNumber=0;
   }
 
-  public getAnchorViewId(): string {
-    return this.activeReferenceId;
-  }
 
-  public isIndependentView(viewId: string): boolean {
-    return this.keyframes.some((frame) => frame.id === viewId && frame.independent);
+  private retainedResidual(old:ViewTransform|undefined,now:number):Homography {
+    if(!old?.correction||old.residualAt===undefined||old.geometryTag!==this.geometryTag())return [...IDENTITY];
+    if(this.pose&&old.residualZoom!==undefined&&Math.abs(this.pose.zoom-old.residualZoom)>.08)return [...IDENTITY];
+    const age=Math.max(0,now-old.residualAt),hold=this.settings.residualHoldMs??250,decay=this.settings.residualDecayMs??750;
+    const gain=Math.max(0,1-Math.max(0,age-hold)/decay);
+    return old.correction.map((v,i)=>IDENTITY[i]+(v-IDENTITY[i])*gain);
   }
-
-  private evictOldestNonAnchorView(): void {
-    const autoViewIndex = this.keyframes.findIndex((frame, index) => index > 0 && !frame.independent);
-    this.keyframes.splice(autoViewIndex > 0 ? autoViewIndex : 1, 1);
+  private geometryTag():string {
+    const c=this.calibration,p=this.pose;
+    return JSON.stringify([c?.imageRotationDegrees||0,p?.roll||0,!!(c?.autoFlip&&p&&((p.tilt>=c.autoFlip.tiltThreshold)===c.autoFlip.above))]);
   }
-
-  public getReferenceKeypoints(): Keypoint[] {
-    return this.refKeypoints;
+  private predictedTransform(h:Homography,old:ViewTransform|undefined,now:number):ViewTransform {
+    const residual=this.retainedResidual(old,now);
+    return {h:multiply(residual,h),time:now,mode:'ptz',residual,
+      correction:old?.correction,residualAt:old?.residualAt,residualZoom:old?.residualZoom,geometryTag:this.geometryTag()};
   }
-
-  public getCurrentKeypoints(): Keypoint[] {
-    return this.currentKeypoints;
+  private projectFeatures(k:Keyframe):Array<[number,number]|null> {
+    if(!this.canPredict(k))return [];
+    let rays=this.rayCache.get(k.id);
+    if(!rays){rays=k.keypoints.map(p=>imageRay(p.x/k.width,p.y/k.height,k.ptzPose!,this.calibration!,k.width/k.height));this.rayCache.set(k.id,rays);}
+    const project=rayProjector(this.pose!,this.calibration!,this.width/this.height);
+    return rays.map(ray=>{
+      const p=ray?project(ray):null;
+      return p?[p[0]*this.width,p[1]*this.height] as [number,number]:null;
+    });
   }
-
-  public getInliers(): FeatureMatch[] {
-    return this.currentInliers;
-  }
-
-  public getMatches(): FeatureMatch[] {
-    return this.currentMatches;
-  }
-
-  public getReferenceImage(): string | null {
-    return this.refImageDataUrl;
-  }
-
-  public getHomography(): Homography | null {
-    if (!this.settings.enabled) {
-      return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  /** Refresh pose projection on the presentation thread even while CV is busy. */
+  updatePtzProjection(width:number,height:number,now=performance.now()) {
+    if(width!==this.width||height!==this.height){this.transforms.clear();this.tracks.clear();this.previousPyramid=null;}
+    this.width=width;this.height=height;
+    if(!this.settings.enabled)return;
+    for(const k of this.keyframes){
+      const h=this.canPredict(k)?ptzHomography(k.ptzPose!,this.pose!,this.calibration!,k.width,k.height,width,height):null;
+      if(h)this.transforms.set(k.id,this.predictedTransform(h,this.transforms.get(k.id),now));
     }
-    if (this.externalHomography) {
-      return this.externalHomography;
+  }
+  getReferenceVersion(){return this.referenceVersion;}
+  exportState(includeReferences=true):RegistrationState {
+    return {origin:performance.timeOrigin,...(includeReferences?{keyframes:this.keyframes}:{}),transforms:[...this.transforms],
+      currentId:this.currentId,keypoints:this.currentKeypoints,matches:this.currentMatches,inliers:this.inliers};
+  }
+  restoreReferences(state:RegistrationState) {
+    this.reset();this.keyframes=state.keyframes||[];this.currentId=state.currentId;
+    this.autoSequence=Math.max(0,...this.keyframes.filter(k=>k.id.startsWith('auto-')).map(k=>Number(k.id.slice(5))||0));
+  }
+  acceptProcessedState(state:RegistrationState) {
+    if(state.keyframes){this.keyframes=state.keyframes;this.rayCache.clear();this.autoSequence=Math.max(0,...this.keyframes.filter(k=>k.id.startsWith('auto-')).map(k=>Number(k.id.slice(5))||0));}this.currentId=state.currentId;
+    this.currentKeypoints=state.keypoints;this.currentMatches=state.matches;this.inliers=state.inliers;
+    const offset=state.origin-performance.timeOrigin;
+    for(const [id,value] of state.transforms){
+      const t={...value,time:value.time+offset,residualAt:value.residualAt===undefined?undefined:value.residualAt+offset};
+      const k=this.keyframes.find(k=>k.id===id);
+      const h=k&&this.canPredict(k)?ptzHomography(k.ptzPose!,this.pose!,this.calibration!,k.width,k.height,this.width,this.height):null;
+      // Late visual output supplies only its correction to the newest displayed PTZ pose.
+      this.transforms.set(id,h?{...this.predictedTransform(h,t,performance.now()),mode:t.mode.startsWith('ptz')?t.mode:'ptz'}:t);
     }
-    return this.smoothedHomography || this.lastValidHomography;
   }
 
-  public setExternalHomography(homography: Homography | null): void {
-    this.externalHomography = homography;
-  }
-
-  /** Camera telemetry ranks candidate anchor views; visual feature matches still confirm each registration. */
-  public setCameraPoseHint(pose: CameraPtzPose | null): void {
-    this.currentPtzPose = pose;
-  }
-
-  /**
-   * Process incoming live frame and compute visual registration
-   */
-  public processFrame(imageData: ImageData): RegistrationMetrics {
-    const startTime = performance.now();
-    const { width, height, data } = imageData;
-
-    // Calculate FPS
-    this.frameCount++;
-    const now = performance.now();
-    if (now - this.lastFpsTime >= 1000) {
-      this.currentFps = Math.round((this.frameCount * 1000) / (now - this.lastFpsTime));
-      this.frameCount = 0;
-      this.lastFpsTime = now;
+  processFrame(image:ImageData,now=performance.now()):RegistrationMetrics {
+    this.settings=registrationSettings(this.settings);
+    const start=performance.now();
+    const automatic=this.keyframes.filter(k=>k.id.startsWith('auto-'));
+    const excess=automatic.length-(this.settings.maxAutoKeyframes??8);
+    if(excess>0){
+      const removed=new Set(automatic.slice(0,excess).map(k=>k.id));
+      this.keyframes=this.keyframes.filter(k=>!removed.has(k.id));this.referenceVersion++;
+      for(const id of removed){this.transforms.delete(id);this.tracks.delete(id);this.rayCache.delete(id);}
     }
-
-    if (!this.refGray) {
-      return {
-        quality: 'UNINITIALIZED',
-        inliers: 0,
-        totalMatches: 0,
-        candidateKeypointsRef: this.refKeypoints.length,
-        candidateKeypointsCur: 0,
-        reprojectionError: 0,
-        homography: this.lastValidHomography,
-        fps: this.currentFps,
-        processingTimeMs: performance.now() - startTime,
-        scaleEstimate: 1,
-        rotationEstimateDeg: 0,
-        translationEstimate: [0, 0],
-      };
-    }
-
-    if (!this.settings.enabled) {
-      return {
-        quality: 'GOOD',
-        inliers: this.refKeypoints.length,
-        totalMatches: this.refKeypoints.length,
-        candidateKeypointsRef: this.refKeypoints.length,
-        candidateKeypointsCur: this.refKeypoints.length,
-        reprojectionError: 0,
-        homography: [1, 0, 0, 0, 1, 0, 0, 0, 1],
-        fps: this.currentFps,
-        processingTimeMs: performance.now() - startTime,
-        scaleEstimate: 1,
-        rotationEstimateDeg: 0,
-        translationEstimate: [0, 0],
-      };
-    }
-
-    // Allocate current frame grayscale buffer
-    if (!this.curGrayBuffer || this.curGrayBuffer.length !== width * height) {
-      this.curGrayBuffer = new Uint8Array(width * height);
-    }
-    rgbaToGrayscale(data, width, height, this.curGrayBuffer);
-
-    // Feature Detection on Current Frame
-    this.currentKeypoints = detectFeatures(
-      this.curGrayBuffer,
-      width,
-      height,
-      this.settings.maxFeatures,
-      this.settings.fastThreshold ?? 16
-    );
-
-    // Feature Matching with Lowe's ratio test
-    this.currentMatches = matchFeatures(
-      this.refKeypoints,
-      this.currentKeypoints,
-      this.settings.matchRatioThreshold,
-      60
-    );
-
-    // RANSAC Homography Estimation with configurable iteration trials
-    const iterations = this.settings.ransacIterations || 300;
-    const ransac = estimateHomographyRANSAC(
-      this.currentMatches,
-      iterations,
-      this.settings.ransacThresholdPx,
-      this.settings.minInliers,
-      this.settings.leastSquaresRefine !== false
-    );
-
-    const hasReliableSupport = this.isReliable(ransac, width, height);
-
-    // If the active view no longer overlaps the current scene, search a small
-    // bounded bank of earlier views. This runs only on weak frames and is
-    // throttled so normal frame processing stays on the fast single-view path.
-    let selectedHomography = ransac.homography;
-    let selectedInliers = ransac.inliers;
-    let selectedMatches = this.currentMatches;
-    let selectedMatchCount = this.currentMatches.length;
-    let selectedReferenceCount = this.refKeypoints.length;
-    let selectedViewId = this.activeReferenceId;
-    let selectedViewIndependent = false;
-    let selectedLocalHomography = ransac.homography;
-    let recoveredFromKeyframe = false;
-    if (!hasReliableSupport && this.keyframes.length > 1 && performance.now() - this.lastKeyframeSearchAt >= 250) {
-      this.lastKeyframeSearchAt = performance.now();
-      const candidates = this.keyframes
-        .map((keyframe, index) => ({ keyframe, index }))
-        .filter(({ keyframe, index }) => index > 0 && keyframe.keypoints !== this.refKeypoints);
-      if (this.currentPtzPose && candidates.some(({ keyframe }) => keyframe.ptzPose)) {
-        const poseDistance = (pose?: CameraPtzPose) => {
-          if (!pose) return Number.POSITIVE_INFINITY;
-          const pan = (pose.pan - this.currentPtzPose!.pan) / 2;
-          const tilt = (pose.tilt - this.currentPtzPose!.tilt) / 2;
-          const zoom = pose.zoom - this.currentPtzPose!.zoom;
-          return pan * pan + tilt * tilt + zoom * zoom * 1.5;
-        };
-        candidates.sort((a, b) => poseDistance(a.keyframe.ptzPose) - poseDistance(b.keyframe.ptzPose));
-      } else if (candidates.length > 1) {
-        const offset = Math.max(0, this.keyframeSearchCursor - 1) % candidates.length;
-        candidates.push(...candidates.splice(0, offset));
+    if(this.width!==image.width||this.height!==image.height){this.previousPyramid=null;this.tracks.clear();this.transforms.clear();}
+    this.width=image.width;this.height=image.height;this.frameNumber++;this.fpsFrames++;
+    if(now-this.fpsAt>1000){this.fps=1000*this.fpsFrames/(now-this.fpsAt);this.fpsAt=now;this.fpsFrames=0;}
+    const gray=new Uint8Array(this.width*this.height);rgbaToGrayscale(image.data,this.width,this.height,gray);
+    const pyramid=grayPyramid(gray,this.width,this.height);
+    this.currentKeypoints=detectMultiscale(pyramid,this.settings.maxFeatures,this.settings.fastThreshold);
+    const scale=Math.max(this.width,this.height)/960, threshold=this.settings.ransacThresholdPx*scale;
+    let bestCount=0,bestError=0,totalMatches=0,mode:RegistrationMetrics['mode']='uncertain';
+    this.inliers=[];this.currentMatches=[];
+    // Prefer last visible view; rotate other searches to avoid starving any manually captured view.
+    const candidates=[...this.keyframes];
+    const cursor=this.searchCursor++%Math.max(1,candidates.length);
+    candidates.push(...candidates.splice(0,cursor));
+    const projectedFeatures=new Map(candidates.map(k=>[k.id,this.projectFeatures(k)]));
+    const visibility=new Map(candidates.map(k=>[k.id,projectedFeatures.get(k.id)!.filter(p=>p&&p[0]>=0&&p[0]<=this.width&&p[1]>=0&&p[1]<=this.height).length]));
+    candidates.sort((a,b)=>(visibility.get(b.id)!-visibility.get(a.id)!) || Number(b.id===this.currentId)-Number(a.id===this.currentId));
+    let visualSearches=0;
+    const nextTracks=new Map<string,FeatureMatch[]>();
+    for(const k of candidates) {
+      let predicted:Homography|null=null;
+      if(this.canPredict(k)) predicted=ptzHomography(k.ptzPose!,this.pose!,this.calibration!,k.width,k.height,this.width,this.height);
+      const old=this.transforms.get(k.id);
+      // Pose is applied every frame, independently of how many views receive a visual search.
+      if(predicted)this.transforms.set(k.id,this.predictedTransform(predicted,old,now));
+      if(predicted&&visibility.get(k.id)!<6)continue;
+      if(visualSearches++>=(this.settings.visualSearchViews??3))continue;
+      let matches:FeatureMatch[]=[];
+      if(this.previousPyramid&&this.tracks.has(k.id)) {
+        const motion=predicted&&this.previousPose&&this.calibration?
+          ptzHomography(this.previousPose,this.pose!,this.calibration,this.width,this.height,this.width,this.height):null;
+        matches=trackMatches(this.previousPyramid,pyramid,this.tracks.get(k.id)!,motion?(x,y)=>projectPoint(motion,x,y):undefined);
       }
-      const searchCount = Math.min(3, candidates.length);
-      for (const { keyframe } of candidates.slice(0, searchCount)) {
-        const keyframeMatches = matchFeatures(
-          keyframe.keypoints,
-          this.currentKeypoints,
-          this.settings.matchRatioThreshold,
-          60
-        );
-        if (keyframeMatches.length < Math.max(8, this.settings.minInliers)) continue;
-        const candidate = estimateHomographyRANSAC(
-          keyframeMatches,
-          Math.min(iterations, 120),
-          this.settings.ransacThresholdPx,
-          this.settings.minInliers,
-          this.settings.leastSquaresRefine !== false
-        );
-        if (!this.isReliable(candidate, keyframe.width, keyframe.height)) continue;
-        const anchorToCurrent = multiplyHomographies(
-          candidate.homography!,
-          keyframe.anchorToKeyframe || IDENTITY
-        );
-        selectedHomography = keyframe.anchorToKeyframe ? anchorToCurrent : null;
-        selectedLocalHomography = candidate.homography;
-        selectedViewId = keyframe.id;
-        selectedViewIndependent = keyframe.independent;
-        selectedInliers = candidate.inliers;
-        selectedMatches = keyframeMatches;
-        selectedMatchCount = keyframeMatches.length;
-        selectedReferenceCount = keyframe.keypoints.length;
-        recoveredFromKeyframe = true;
-        break;
+      if(matches.length<this.settings.minInliers || this.frameNumber%(this.settings.descriptorIntervalFrames??5)===0) {
+        const geometry=predicted?{predict:(_x:number,_y:number,index:number)=>projectedFeatures.get(k.id)![index],radiusPx:(this.settings.ptzResidualLimitPx??24)*scale*1.5}:undefined;
+        const descriptors=matchFeatures(k.keypoints,this.currentKeypoints,this.settings.matchRatioThreshold,52,geometry);
+        const combined=new Map(matches.map(m=>[m.refIdx,m]));
+        for(const m of descriptors)combined.set(m.refIdx,m);
+        matches=[...combined.values()];
       }
-      if (!this.currentPtzPose && candidates.length > 0) {
-        this.keyframeSearchCursor = 1 + ((this.keyframeSearchCursor - 1 + searchCount) % candidates.length);
-      }
-    }
-
-    const finalReliable = hasReliableSupport || recoveredFromKeyframe;
-
-    if (recoveredFromKeyframe && selectedHomography) {
-      // A keyframe switch can be a large pose jump; do not interpolate matrix
-      // coefficients across unrelated views.
-      this.lastValidHomography = selectedHomography;
-      this.smoothedHomography = [...selectedHomography];
-      this.consecutiveWeakFrames = 0;
-    }
-
-    if (finalReliable) {
-      this.currentMatchedViewId = selectedViewId;
-      this.currentMatchedViewHomography = selectedLocalHomography;
-      this.currentMatchedViewIndependent = selectedViewIndependent;
-    }
-
-    let quality: RegistrationQuality;
-    if (finalReliable) {
-      quality = 'GOOD';
-      this.consecutiveWeakFrames = 0;
-    } else {
-      this.consecutiveWeakFrames++;
-      const hasSomeSupport = ransac.homography !== null && ransac.inlierCount >= 4;
-      const graceFrames = this.settings.lostFrameToleranceFrames ?? 12;
-      quality = hasSomeSupport || this.consecutiveWeakFrames <= graceFrames
-        ? 'DEGRADED'
-        : 'LOST';
-    }
-
-    this.currentInliers = recoveredFromKeyframe ? selectedInliers : ransac.inliers;
-    if (recoveredFromKeyframe) this.currentMatches = selectedMatches;
-    this.lastQuality = quality;
-
-    // Only promote a geometrically supported estimate. A four-to-seven point
-    // fit can satisfy the minimum needed to solve a homography while still
-    // being badly conditioned; applying it makes overlays jump dramatically.
-    // Keep the last trusted transform during DEGRADED/LOST frames and recover
-    // as soon as the scene provides enough well-distributed inliers again.
-    if (quality === 'GOOD') {
-      if (selectedHomography) {
-        if (!recoveredFromKeyframe) this.lastValidHomography = selectedHomography;
-
-        // Smooth homography with configurable alpha to eliminate high-frequency jitter
-        const alpha = this.settings.smoothingFactor ?? 0.5;
-        if (!this.smoothedHomography) {
-          this.smoothedHomography = [...selectedHomography];
-        } else {
-          for (let i = 0; i < 9; i++) {
-            this.smoothedHomography[i] =
-              alpha * selectedHomography[i] + (1 - alpha) * this.smoothedHomography[i];
+      totalMatches+=matches.length;
+      let h:Homography|null=null,accepted:FeatureMatch[]=[],error=0,residual:Homography|undefined;
+      if(predicted) {
+        const expected=matches.flatMap(m=>{
+          const p=projectedFeatures.get(k.id)![m.refIdx];
+          if(!p)return [];
+          const [x,y]=p;
+          if(Math.hypot(x-m.curX,y-m.curY)>(this.settings.ptzResidualLimitPx??24)*scale*1.5)return [];
+          return [{...m,refX:x,refY:y}];
+        });
+        const result=fitSimilarity(expected,threshold,(this.settings.ptzResidualLimitPx??24)*scale,this.width,this.height);
+        if(result&&result.inliers.length>=this.settings.minInliers&&result.error<threshold){
+          residual=result.homography;
+          // Smooth only the small similarity correction. The primary pose never lags behind a matrix filter.
+          if(old?.residual&&old.mode==='ptz+visual'&&now-old.time<200){
+            const alpha=this.settings.smoothingFactor??0.65;
+            residual=residual.map((v,i)=>alpha*v+(1-alpha)*old.residual![i]);
+          }
+          h=multiply(residual,predicted);error=result.error;
+          const ids=new Set(result.inliers.map(m=>m.refIdx));accepted=matches.filter(m=>ids.has(m.refIdx));
+        } else {residual=this.retainedResidual(old,now);h=multiply(residual,predicted);}
+      } else {
+        const result=estimateHomographyRANSAC(matches,this.settings.ransacIterations,threshold,this.settings.minInliers,this.settings.leastSquaresRefine);
+        const xs=result.inliers.map(m=>m.refX),ys=result.inliers.map(m=>m.refY);
+        if(result.homography&&result.inlierCount>=this.settings.minInliers&&result.avgReprojectionError<=threshold&&
+          Math.max(...xs)-Math.min(...xs)>k.width*0.15&&Math.max(...ys)-Math.min(...ys)>k.height*0.12){
+          h=result.homography;accepted=result.inliers;error=result.avgReprojectionError;
+          if(old?.mode==='visual'&&now-old.time<(this.settings.updateIntervalMs*2)){
+            const corners:[number,number][]=[[0,0],[k.width,0],[k.width,k.height],[0,k.height]];
+            const alpha=this.settings.smoothingFactor??.65;
+            const smooth=corners.map(p=>{const a=projectPoint(old.h,...p),b=projectPoint(h!,...p);
+              return [a[0]*(1-alpha)+b[0]*alpha,a[1]*(1-alpha)+b[1]*alpha] as [number,number];});
+            h=solveHomography4Points(corners,smooth)||h;
           }
         }
-        this.maybeAddKeyframe(this.currentKeypoints, width, height, selectedHomography);
       }
-      if (recoveredFromKeyframe && !selectedHomography && selectedLocalHomography) {
-        // Independent setup views use their own pixel coordinates and do not
-        // fabricate a transform into the first view's coordinate plane.
-        this.smoothedHomography = this.lastValidHomography;
+      if(!h)continue;
+      const localMode=predicted?(accepted.length?'ptz+visual':'ptz'):'visual';
+      this.transforms.set(k.id,{h,time:now,mode:localMode,residual,
+        correction:predicted?(accepted.length?residual:old?.correction):undefined,
+        residualAt:predicted?(accepted.length?now:old?.residualAt):undefined,
+        residualZoom:predicted?(accepted.length?this.pose!.zoom:old?.residualZoom):undefined,geometryTag:this.geometryTag()});
+      if(!k.independent&&k.anchorToKeyframe&&k.id!==this.getAnchorViewId()) {
+        // anchor->keyframe followed by keyframe->current (never the inverse).
+        this.transforms.set(this.getAnchorViewId(),{h:multiply(h,k.anchorToKeyframe),time:now,mode:'visual'});
       }
-    } else {
-      // Registration is LOST: Overlays are FROZEN at last valid position per Section 16 & Section 29
-      // We do not change smoothedHomography
-    }
-
-    const procTime = performance.now() - startTime;
-
-    return {
-      quality,
-      inliers: recoveredFromKeyframe ? selectedInliers.length : ransac.inlierCount,
-      totalMatches: selectedMatchCount,
-      candidateKeypointsRef: selectedReferenceCount,
-      candidateKeypointsCur: this.currentKeypoints.length,
-      reprojectionError: ransac.avgReprojectionError,
-      homography: this.smoothedHomography || this.lastValidHomography,
-      fps: this.currentFps,
-      processingTimeMs: procTime,
-      scaleEstimate: ransac.scale,
-      rotationEstimateDeg: ransac.rotationDeg,
-      translationEstimate: ransac.translation,
-    };
-  }
-
-  public reset(): void {
-    this.refGray = null;
-    this.refKeypoints = [];
-    this.keyframes = [];
-    this.refImageDataUrl = null;
-    this.currentMatches = [];
-    this.currentInliers = [];
-    this.currentKeypoints = [];
-    this.lastValidHomography = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-    this.smoothedHomography = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-    this.externalHomography = null;
-    this.lastQuality = 'UNINITIALIZED';
-    this.consecutiveWeakFrames = 0;
-    this.currentMatchedViewId = null;
-    this.currentMatchedViewHomography = null;
-    this.currentMatchedViewIndependent = false;
-  }
-
-  private isReliable(
-    result: ReturnType<typeof estimateHomographyRANSAC>,
-    width: number,
-    height: number
-  ): boolean {
-    const coverage = this.getInlierCoverage(result.inliers, width, height);
-    return result.homography !== null &&
-      result.inlierCount >= this.settings.minInliers &&
-      coverage.x >= 0.15 && coverage.y >= 0.12 &&
-      result.avgReprojectionError <= this.settings.ransacThresholdPx * 0.75;
-  }
-
-  private maybeAddKeyframe(
-    keypoints: Keypoint[],
-    width: number,
-    height: number,
-    anchorToCurrent: Homography
-  ): void {
-    const inverse = invertHomography(anchorToCurrent);
-    if (!inverse) return;
-    const latest = [...this.keyframes].reverse().find((frame) => frame.anchorToKeyframe !== null);
-    if (latest?.anchorToKeyframe) {
-      const corners: [number, number][] = [[0, 0], [width, 0], [0, height], [width, height]];
-      let displacement = 0;
-      for (const [x, y] of corners) {
-        const [oldX, oldY] = projectPoint(latest.anchorToKeyframe, x, y);
-        const [newX, newY] = projectPoint(inverse, x, y);
-        displacement = Math.max(displacement, Math.hypot(oldX - newX, oldY - newY));
+      if(accepted.length)nextTracks.set(k.id,accepted);
+      if(accepted.length>bestCount||mode==='uncertain'){
+        bestCount=accepted.length;bestError=error;this.currentMatches=matches;this.inliers=accepted;
+        this.currentId=k.independent?k.id:this.getAnchorViewId();mode=localMode;
       }
-      if (displacement < 80) return;
+      if(accepted.length>=this.settings.minInliers&&!predicted&&!k.independent&&this.settings.adaptiveReference&&this.frameNumber%30===0&&(this.settings.maxAutoKeyframes??8)>0){
+        const anchorH=k.anchorToKeyframe?multiply(h,k.anchorToKeyframe):h;
+        const root=this.keyframes[0];
+        const center=projectPoint(anchorH,root.width/2,root.height/2);
+        if(Math.hypot(center[0]-this.width/2,center[1]-this.height/2)>this.width*0.12){
+          this.referenceVersion++;
+          this.keyframes.push({id:`auto-${++this.autoSequence}`,independent:false,keypoints:this.currentKeypoints,width:this.width,height:this.height,anchorToKeyframe:anchorH});
+          const auto=this.keyframes.filter(v=>v.id.startsWith('auto-'));if(auto.length>(this.settings.maxAutoKeyframes??8)){this.rayCache.delete(auto[0].id);this.keyframes=this.keyframes.filter(v=>v!==auto[0]);}
+        }
+      }
     }
-
-    // Keep the original anchor plus at most 23 recent views. Only descriptors
-    // are retained, keeping the map compact and the search workload bounded.
-    this.keyframes.push({
-      id: `auto-view-${Date.now()}-${this.keyframes.length}`,
-      independent: false,
-      keypoints,
-      width,
-      height,
-      anchorToKeyframe: inverse,
-    });
-    if (this.keyframes.length > 24) this.evictOldestNonAnchorView();
-  }
-
-  private getInlierCoverage(
-    inliers: FeatureMatch[],
-    width: number,
-    height: number
-  ): { x: number; y: number } {
-    if (inliers.length < 4 || width <= 0 || height <= 0) {
-      return { x: 0, y: 0 };
-    }
-
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minY = Infinity;
-    let maxY = -Infinity;
-    for (const match of inliers) {
-      minX = Math.min(minX, match.refX);
-      maxX = Math.max(maxX, match.refX);
-      minY = Math.min(minY, match.refY);
-      maxY = Math.max(maxY, match.refY);
-    }
-
-    return {
-      x: (maxX - minX) / width,
-      y: (maxY - minY) / height,
-    };
+    if(this.external.size)mode='simulator';
+    else if(mode==='uncertain'&&[...this.transforms.values()].some(t=>t.time===now&&t.mode==='ptz'))mode='ptz';
+    if(mode!=='uncertain')this.lastGoodAt=now;
+    this.tracks=nextTracks;this.previousPyramid=pyramid;this.previousPose=this.pose;
+    const h=this.getHomography();
+    return {quality:!this.keyframes.length?'UNINITIALIZED':mode==='ptz'?'DEGRADED':mode!=='uncertain'?'GOOD':now-this.lastGoodAt<Math.min(this.settings.transformMaxAgeMs??500,(this.settings.lostFrameToleranceFrames??8)*this.settings.updateIntervalMs)?'DEGRADED':'LOST',
+      mode,trackingHint:this.getTrackingHint(),poseAgeMs:Number.isFinite(this.poseAge)?this.poseAge:undefined,frameWidth:this.width,frameHeight:this.height,
+      inliers:bestCount,totalMatches,candidateKeypointsRef:this.getReferenceKeypoints().length,candidateKeypointsCur:this.currentKeypoints.length,
+      reprojectionError:bestError,homography:h,fps:Math.round(this.fps),processingTimeMs:performance.now()-start,
+      scaleEstimate:h?Math.hypot(h[0],h[3]):1,rotationEstimateDeg:h?Math.atan2(h[3],h[0])*180/Math.PI:0,translationEstimate:h?[h[2],h[5]]:[0,0]};
   }
 }

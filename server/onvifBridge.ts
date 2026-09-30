@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { VideoGateway } from './videoGateway.ts';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { Buffer } from 'node:buffer';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -10,6 +12,8 @@ import nodeOnvif from 'node-onvif';
 import type { CameraPtzPose, OnvifCameraConfig, OnvifMediaProfile } from '../src/types.ts';
 
 interface OnvifSession {
+  id: string;
+  gateway?: VideoGateway;
   device: any;
   config: OnvifCameraConfig;
   configKey: string;
@@ -22,6 +26,14 @@ interface OnvifSession {
 }
 
 let activeSession: OnvifSession | null = null;
+let lifecycle = Promise.resolve();
+async function lockLifecycle() {
+  let release!: () => void;
+  const prior = lifecycle;
+  lifecycle = new Promise<void>(resolve => { release = resolve; });
+  await prior;
+  return release;
+}
 
 function reply(res: ServerResponse, status: number, payload: unknown): void {
   res.statusCode = status;
@@ -49,7 +61,7 @@ async function readJson(req: IncomingMessage): Promise<any> {
   for await (const chunk of req) {
     const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += data.length;
-    if (size > 16_384) throw new Error('The ONVIF setup request is too large.');
+    if (size > 131_072) throw new Error('The ONVIF setup request is too large.');
     chunks.push(data);
   }
   return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
@@ -74,11 +86,12 @@ function normalizeConfig(value: Partial<OnvifCameraConfig>): OnvifCameraConfig {
     username: String(value.username || ''),
     password: String(value.password || ''),
     profileToken: value.profileToken || undefined,
+    transport: value.transport === 'hls' ? 'hls' : 'webrtc',
   };
 }
 
 function configKey(config: OnvifCameraConfig): string {
-  return JSON.stringify([config.host, config.port, config.rtspPort, config.endpointPath, config.username, config.password]);
+  return JSON.stringify([config.host, config.port, config.rtspPort, config.endpointPath, config.username, config.password, config.transport, config.profileToken]);
 }
 
 function normalizeIncompleteProfileMetadata(result: any): any {
@@ -180,7 +193,7 @@ async function initializeDevice(config: OnvifCameraConfig): Promise<{device: any
   }
 }
 
-function summarizeProfile(profile: any): OnvifMediaProfile {
+export function summarizeProfile(profile: any): OnvifMediaProfile {
   const resolution = profile?.video?.encoder?.resolution || {};
   return {
     token: String(profile?.token || profile?.Token || ''),
@@ -189,7 +202,89 @@ function summarizeProfile(profile: any): OnvifMediaProfile {
     height: Number(resolution.height || 0),
     encoding: String(profile?.video?.encoder?.encoding || 'Unknown').toUpperCase(),
     frameRate: Number(profile?.video?.encoder?.framerate || 0),
+    bitrate: Number(profile?.video?.encoder?.bitrate || 0),
+    encoderToken: profile?.video?.encoder?.token,
+    crop: profile?.video?.source?.bounds,
   };
+}
+
+const asArray = (value: any): any[] => value == null ? [] : Array.isArray(value) ? value : [value];
+async function discoverProfiles(device: any): Promise<OnvifMediaProfile[]> {
+  const profiles: OnvifMediaProfile[] = (device.getProfileList() || []).map(summarizeProfile).filter((p: OnvifMediaProfile) => p.token);
+  let raw: any[] = [];
+  try { raw = asArray((await device.services.media.getProfiles())?.data?.GetProfilesResponse?.Profiles); } catch { /* Profile summaries remain usable. */ }
+  for (const p of profiles) {
+    const original = raw.find(r => r?.$?.token === p.token);
+    const rawEncoder=original?.VideoEncoderConfiguration;
+    p.encoderToken=rawEncoder?.$?.token||p.encoderToken;
+    p.width=Number(rawEncoder?.Resolution?.Width)||p.width;p.height=Number(rawEncoder?.Resolution?.Height)||p.height;
+    p.frameRate=Number(rawEncoder?.RateControl?.FrameRateLimit)||p.frameRate;
+    p.bitrate=Number(rawEncoder?.RateControl?.BitrateLimit)||p.bitrate;
+    p.encoding=String(rawEncoder?.Encoding||p.encoding).toUpperCase();
+    if ((!p.width || !p.height || p.encoding === 'UNKNOWN') && p.encoderToken) {
+      try {
+        const response = await device.services.media.getVideoEncoderConfiguration({ ConfigurationToken: p.encoderToken });
+        const encoder = response?.data?.GetVideoEncoderConfigurationResponse?.Configuration;
+        p.width = Number(encoder?.Resolution?.Width) || p.width;
+        p.height = Number(encoder?.Resolution?.Height) || p.height;
+        p.frameRate = Number(encoder?.RateControl?.FrameRateLimit) || p.frameRate;
+        p.bitrate = Number(encoder?.RateControl?.BitrateLimit) || p.bitrate;
+        p.encoding = String(encoder?.Encoding || p.encoding).toUpperCase();
+      } catch { /* Zero dimensions mean unknown, never an invented default. */ }
+    }
+    const encoder=original?.VideoEncoderConfiguration;
+    p.encoderToken=encoder?.$?.token||p.encoderToken;
+    p.h264Profile=encoder?.H264?.H264Profile;
+    p.keyframeInterval=Number(encoder?.H264?.GovLength)||undefined;
+    const bounds=original?.VideoSourceConfiguration?.Bounds?.$;
+    if(bounds&&Number(bounds.width)>0&&Number(bounds.height)>0)p.crop={x:Number(bounds.x)||0,y:Number(bounds.y)||0,width:Number(bounds.width),height:Number(bounds.height)};
+    const config = original?.PTZConfiguration;
+    if (!config) continue;
+    p.ptz = { configurationToken: config.$?.token, panTiltSpace: config.DefaultAbsolutePantTiltPositionSpace || config.DefaultAbsolutePanTiltPositionSpace,
+      zoomSpace: config.DefaultAbsoluteZoomPositionSpace, nodeToken:config.NodeToken,
+      continuousPanTiltSpace:config.DefaultContinuousPanTiltVelocitySpace,
+      continuousZoomSpace:config.DefaultContinuousZoomVelocitySpace };
+    try {
+      const response = await device.services.ptz.getConfigurationOptions({ ConfigurationToken: config.$.token });
+      const spaces = response?.data?.GetConfigurationOptionsResponse?.PTZConfigurationOptions?.Spaces;
+      const pan = asArray(spaces?.AbsolutePanTiltPositionSpace).find(s => s.URI === p.ptz!.panTiltSpace) || asArray(spaces?.AbsolutePanTiltPositionSpace)[0];
+      const zoom = asArray(spaces?.AbsoluteZoomPositionSpace).find(s => s.URI === p.ptz!.zoomSpace) || asArray(spaces?.AbsoluteZoomPositionSpace)[0];
+      const range = (v: any): [number,number] | undefined => v && Number.isFinite(Number(v.Min)) && Number.isFinite(Number(v.Max)) && Number(v.Max) > Number(v.Min) ? [Number(v.Min),Number(v.Max)] : undefined;
+      p.ptz = { ...p.ptz, panTiltSpace: pan?.URI, zoomSpace: zoom?.URI,
+        panRange: range(config.PanTiltLimits?.Range?.XRange)||range(pan?.XRange),
+        tiltRange: range(config.PanTiltLimits?.Range?.YRange)||range(pan?.YRange),
+        zoomRange: range(config.ZoomLimits?.Range?.XRange)||range(zoom?.XRange) };
+      const velocity=asArray(spaces?.ContinuousPanTiltVelocitySpace).find(v=>v.URI===p.ptz!.continuousPanTiltSpace)||asArray(spaces?.ContinuousPanTiltVelocitySpace)[0];
+      const zoomVelocity=asArray(spaces?.ContinuousZoomVelocitySpace).find(v=>v.URI===p.ptz!.continuousZoomSpace)||asArray(spaces?.ContinuousZoomVelocitySpace)[0];
+      p.ptz={...p.ptz,continuousPanTiltSpace:velocity?.URI,continuousZoomSpace:zoomVelocity?.URI,
+        continuousPanRange:range(velocity?.XRange),continuousTiltRange:range(velocity?.YRange),continuousZoomRange:range(zoomVelocity?.XRange)};
+    } catch { /* Some Profile S cameras omit optional configuration operations. */ }
+  }
+  if(device.services?.ptz) {
+    try {
+      let nodes:any[]=[];
+      try{nodes=asArray((await device.services.ptz.getNodes())?.data?.GetNodesResponse?.PTZNode);}
+      catch{
+        for(const token of new Set(profiles.map(p=>p.ptz?.nodeToken).filter(Boolean))){
+          try{nodes.push((await device.services.ptz.getNode({NodeToken:token}))?.data?.GetNodeResponse?.PTZNode);}catch{}
+        }
+        nodes=nodes.filter(Boolean);
+      }
+      const range=(v:any):[number,number]|undefined=>v&&Number.isFinite(Number(v.Min))&&Number.isFinite(Number(v.Max))&&Number(v.Max)>Number(v.Min)?[Number(v.Min),Number(v.Max)]:undefined;
+      for(const p of profiles){
+        if(!p.ptz)continue;
+        const node=nodes.find(n=>n.$?.token===p.ptz!.nodeToken)||(nodes.length===1?nodes[0]:null);
+        if(!node)continue;
+        const spaces=node.SupportedPTZSpaces;
+        const pan=asArray(spaces?.AbsolutePanTiltPositionSpace).find(v=>v.URI===p.ptz!.panTiltSpace)||asArray(spaces?.AbsolutePanTiltPositionSpace)[0];
+        const zoom=asArray(spaces?.AbsoluteZoomPositionSpace).find(v=>v.URI===p.ptz!.zoomSpace)||asArray(spaces?.AbsoluteZoomPositionSpace)[0];
+        p.ptz={...p.ptz,nodeToken:node.$?.token,homeSupported:node.HomeSupported===true||node.HomeSupported==='true',
+          panTiltSpace:p.ptz.panTiltSpace||pan?.URI,zoomSpace:p.ptz.zoomSpace||zoom?.URI,
+          panRange:p.ptz.panRange||range(pan?.XRange),tiltRange:p.ptz.tiltRange||range(pan?.YRange),zoomRange:p.ptz.zoomRange||range(zoom?.XRange)};
+      }
+    }catch{/* Configuration spaces remain available when GetNodes is unsupported. */}
+  }
+  return profiles;
 }
 
 function chooseProfile(profiles: OnvifMediaProfile[]): OnvifMediaProfile | undefined {
@@ -202,6 +297,8 @@ function chooseProfile(profiles: OnvifMediaProfile[]): OnvifMediaProfile | undef
 }
 
 async function stopStream(session: OnvifSession): Promise<void> {
+  await session.gateway?.stop();
+  session.gateway = undefined;
   if (session.ffmpeg && session.ffmpeg.exitCode === null) {
     session.ffmpeg.kill('SIGTERM');
     await new Promise<void>((resolve) => {
@@ -226,12 +323,14 @@ async function closeSession(): Promise<void> {
   if (!activeSession) return;
   const previous = activeSession;
   activeSession = null;
+  if(previous.profileToken&&previous.device?.services?.ptz)await previous.device.services.ptz.stop({ProfileToken:previous.profileToken,PanTilt:true,Zoom:true}).catch(()=>{});
   await stopStream(previous);
 }
 
 async function waitForPlaylist(session: OnvifSession, playlistPath: string): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < 12_000) {
+    if(session.ffmpegError.includes('ENOENT'))throw new Error('FFmpeg is not available. Select WebRTC, or set FFMPEG_PATH to the full ffmpeg executable path and restart Vite.');
     if (session.ffmpeg?.exitCode !== null && session.ffmpeg?.exitCode !== undefined) {
       throw new Error(session.ffmpegError || 'FFmpeg stopped before the live stream was ready.');
     }
@@ -256,6 +355,7 @@ function applyStreamSettings(streamUri: string, config: OnvifCameraConfig): stri
 
 async function startStream(session: OnvifSession, profileToken?: string): Promise<OnvifMediaProfile> {
   const requested = profileToken && session.profiles.find((profile) => profile.token === profileToken);
+  if(profileToken&&!requested)throw new Error('The selected stream profile no longer exists. Discover the camera profiles again.');
   const selected = requested || chooseProfile(session.profiles);
   if (!selected) throw new Error('The camera did not return a video profile.');
 
@@ -266,6 +366,12 @@ async function startStream(session: OnvifSession, profileToken?: string): Promis
   if (!streamUri) throw new Error('The selected ONVIF profile did not provide an RTSP stream URI.');
 
   await stopStream(session);
+  if (session.config.transport !== 'hls') {
+    if (selected.encoding !== 'H264') throw new Error('Choose a standard H.264 camera profile for WebRTC playback without FFmpeg.');
+    session.gateway = new VideoGateway();
+    await session.gateway.start(applyStreamSettings(streamUri, session.config));
+    return selected;
+  }
   const directory = await mkdtemp(path.join(tmpdir(), 'vaas-onvif-'));
   session.streamDirectory = directory;
   session.ffmpegError = '';
@@ -284,7 +390,7 @@ async function startStream(session: OnvifSession, profileToken?: string): Promis
     '-hls_flags', 'delete_segments+append_list+independent_segments',
     '-hls_segment_filename', segmentPath,
     playlistPath,
-  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide:true });
   session.ffmpeg = ffmpeg;
   ffmpeg.stderr?.on('data', (chunk: Buffer) => {
     session.ffmpegError = `${session.ffmpegError}${chunk.toString('utf8')}`.slice(-4000);
@@ -307,7 +413,7 @@ function numericAttribute(value: any, key: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function extractPtzPose(result: any): CameraPtzPose | null {
+export function extractPtzPose(result: any): CameraPtzPose | null {
   const data = result?.data || {};
   const response = data.GetStatusResponse || data;
   const status = response.PTZStatus || response.PtzStatus || response;
@@ -318,7 +424,12 @@ function extractPtzPose(result: any): CameraPtzPose | null {
   const tilt = numericAttribute(panTilt, 'y');
   const zoomValue = numericAttribute(zoom, 'x');
   if (pan === null || tilt === null || zoomValue === null) return null;
-  return { pan, tilt, zoom: zoomValue };
+  return { pan, tilt, zoom: zoomValue,
+    panTiltSpace: panTilt?.$?.space, zoomSpace: zoom?.$?.space,
+    deviceTime: status.UtcTime,
+    moving: status.MoveStatus && [status.MoveStatus.PanTilt,status.MoveStatus.Zoom].some(v=>v==='MOVING')?true:
+      status.MoveStatus && [status.MoveStatus.PanTilt,status.MoveStatus.Zoom].some(v=>v==='IDLE') && [status.MoveStatus.PanTilt,status.MoveStatus.Zoom].filter(Boolean).every(v=>v==='IDLE')?false:undefined,
+  };
 }
 
 export function onvifBridge(): Plugin {
@@ -329,9 +440,12 @@ export function onvifBridge(): Plugin {
         const requestUrl = new URL(req.url || '/', 'http://localhost');
         if (!requestUrl.pathname.startsWith('/api/onvif/')) return next();
         if (!isSameOriginRequest(req)) return reply(res, 403, { error: 'ONVIF requests must come from this VAAS page.' });
+        const release = /\/(discover|connect|disconnect|rtsp|ptz)$/.test(requestUrl.pathname) ? await lockLifecycle() : () => {};
         try {
           if (requestUrl.pathname.startsWith('/api/onvif/stream/')) {
-            const filename = path.basename(decodeURIComponent(requestUrl.pathname.slice('/api/onvif/stream/'.length)));
+            const [streamSessionId,encodedFilename]=requestUrl.pathname.slice('/api/onvif/stream/'.length).split('/');
+            if(streamSessionId!==activeSession?.id)return reply(res,410,{error:'Camera stream session has changed.'});
+            const filename=path.basename(decodeURIComponent(encodedFilename||''));
             if (!/^(index\.m3u8|segment_\d+\.ts)$/.test(filename) || !activeSession?.streamDirectory) {
               return reply(res, 404, { error: 'Live camera stream is not available.' });
             }
@@ -348,9 +462,10 @@ export function onvifBridge(): Plugin {
             await closeSession();
             const {device, deviceInfo} = await initializeDevice(config);
             if (!device.services?.ptz) throw new Error('The camera responds to ONVIF but does not expose the PTZ service.');
-            const profiles = (device.getProfileList() || []).map(summarizeProfile).filter((profile: OnvifMediaProfile) => profile.token);
+            const profiles = await discoverProfiles(device);
             if (!profiles.length) throw new Error('The camera did not return any ONVIF media profiles.');
             activeSession = {
+              id: randomUUID(),
               device,
               config,
               configKey: configKey(config),
@@ -374,8 +489,9 @@ export function onvifBridge(): Plugin {
               await closeSession();
               const {device, deviceInfo} = await initializeDevice(config);
               if (!device.services?.ptz) throw new Error('The camera responds to ONVIF but does not expose the PTZ service.');
-              const profiles = (device.getProfileList() || []).map(summarizeProfile).filter((profile: OnvifMediaProfile) => profile.token);
+              const profiles = await discoverProfiles(device);
               activeSession = {
+                id: randomUUID(),
                 device,
                 config,
                 configKey: configKey(config),
@@ -388,19 +504,49 @@ export function onvifBridge(): Plugin {
               } as OnvifSession;
             }
             if (!activeSession) throw new Error('ONVIF initialization did not complete.');
+            // A new owner always receives a new ID, including reuse of a discovered device.
+            activeSession.id=randomUUID();activeSession.config=config;
             const selected = await startStream(activeSession, config.profileToken);
+            if(res.destroyed){await closeSession();return;}
             return reply(res, 200, {
               device: { manufacturer: activeSession.deviceInfo?.Manufacturer || '', model: activeSession.deviceInfo?.Model || '' },
               profile: selected,
               profiles: activeSession.profiles,
               ptzSupported: true,
-              streamPath: '/api/onvif/stream/index.m3u8',
+              sessionId: activeSession.id,
+              transport: config.transport,
+              streamPath: `/api/onvif/stream/${activeSession.id}/index.m3u8`,
             });
+          }
+
+          if (req.method === 'POST' && requestUrl.pathname === '/api/onvif/webrtc') {
+            const body = await readJson(req);
+            if (!activeSession?.gateway || body.sessionId !== activeSession.id) throw new Error('Camera session changed. Reconnect the camera.');
+            if (typeof body.sdp !== 'string' || !body.sdp.startsWith('v=0')) throw new Error('Invalid WebRTC offer.');
+            const session=activeSession,id=session.id;
+            const sdp=await session.gateway!.offer(body.sdp);
+            if(activeSession!==session||activeSession.id!==id)return reply(res,409,{error:'Camera session changed during WebRTC negotiation.'});
+            return reply(res,200,{sdp});
+          }
+
+          if (req.method === 'POST' && requestUrl.pathname === '/api/onvif/rtsp') {
+            const body = await readJson(req);
+            const url = new URL(String(body.url || ''));
+            if (!['rtsp:', 'rtsps:'].includes(url.protocol)) throw new Error('Enter an RTSP camera URL.');
+            await closeSession();
+            const gateway = new VideoGateway();
+            const id = randomUUID();
+            activeSession = { id, device: null, gateway, config: { username: decodeURIComponent(url.username), password: decodeURIComponent(url.password) } as OnvifCameraConfig,
+              configKey: '', profileToken: '', profiles: [], deviceInfo: {}, ffmpeg: null, streamDirectory: null, ffmpegError: '' };
+            await gateway.start(url.toString());
+            if(res.destroyed){await closeSession();return;}
+            return reply(res, 200, { sessionId: id, transport: 'webrtc' });
           }
 
           if (req.method === 'POST' && requestUrl.pathname === '/api/onvif/ptz') {
             if (!activeSession?.profileToken) throw new Error('Connect the ONVIF camera before moving it.');
             const command = await readJson(req);
+            if (command.sessionId !== activeSession.id) throw new Error('Camera session changed.');
             if (command.action === 'stop') {
               await activeSession.device.services.ptz.stop({ ProfileToken: activeSession.profileToken, PanTilt: true, Zoom: true });
             } else if (command.action === 'home') {
@@ -409,7 +555,11 @@ export function onvifBridge(): Plugin {
               const clamp = (value: unknown) => Math.max(-1, Math.min(1, Number(value) || 0));
               await activeSession.device.services.ptz.continuousMove({
                 ProfileToken: activeSession.profileToken,
-                Velocity: { x: clamp(command.pan), y: clamp(command.tilt), z: clamp(command.zoom) },
+                Velocity: (()=>{
+                  const p=activeSession!.profiles.find(p=>p.token===activeSession!.profileToken)?.ptz;
+                  const speed=(v:unknown,range?:[number,number])=>{const n=clamp(v);return n*(n>=0?(range?.[1]??1):-(range?.[0]??-1));};
+                  return {x:speed(command.pan,p?.continuousPanRange),y:speed(command.tilt,p?.continuousTiltRange),z:speed(command.zoom,p?.continuousZoomRange)};
+                })(),
                 Timeout: 1,
               });
             }
@@ -418,12 +568,18 @@ export function onvifBridge(): Plugin {
 
           if (req.method === 'GET' && requestUrl.pathname === '/api/onvif/status') {
             if (!activeSession?.profileToken) return reply(res, 200, { connected: false, ptzPose: null });
-            const result = await activeSession.device.services.ptz.getStatus({ ProfileToken: activeSession.profileToken });
-            return reply(res, 200, { connected: true, ptzPose: extractPtzPose(result) });
+            const session = activeSession;
+            if (requestUrl.searchParams.has('sessionId') && requestUrl.searchParams.get('sessionId') !== session.id) return reply(res, 409, { error: 'Camera session changed.' });
+            const sessionId=session.id,profileToken=session.profileToken;
+            const requestedAt = Date.now();
+            const result = await session.device.services.ptz.getStatus({ ProfileToken: profileToken });
+            const receivedAt = Date.now();
+            return reply(res, 200, { connected: activeSession === session && session.id===sessionId && session.profileToken===profileToken, sessionId, ptzPose: extractPtzPose(result), requestedAt, receivedAt });
           }
 
           if (req.method === 'POST' && requestUrl.pathname === '/api/onvif/disconnect') {
-            await closeSession();
+            const body = await readJson(req);
+            if (activeSession && body.sessionId === activeSession.id) await closeSession();
             return reply(res, 200, { ok: true });
           }
 
@@ -437,8 +593,9 @@ export function onvifBridge(): Plugin {
               }
             }
           }
+          if(/\/(connect|rtsp)$/.test(requestUrl.pathname))await closeSession().catch(()=>{});
           return reply(res, 502, { error: message.slice(0, 500) });
-        }
+        } finally { release(); }
       });
 
       server.httpServer?.once('close', () => {

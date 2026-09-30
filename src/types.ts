@@ -22,8 +22,8 @@ export interface FeatureDefinition {
 export interface ExerciseFeature {
   id: string;
   type: FeatureType;
-  x: number; // Reference frame coordinate X
-  y: number; // Reference frame coordinate Y
+  x: number; // Normalized source-image X in the anchor's saved view
+  y: number; // Normalized source-image Y in the anchor's saved view
   label: string;
   rotation?: number; // 0-360 deg
   scale?: number;
@@ -37,7 +37,7 @@ export interface ExerciseFeature {
   anchorViewId?: string;
 }
 
-export type BoundaryPoint = [number, number]; // [x, y] in reference frame
+export type BoundaryPoint = [number, number]; // Normalized source-image [x, y]
 
 export interface BoundaryConfig {
   name: string;
@@ -56,11 +56,17 @@ export interface ExerciseBoundary {
   visible: boolean;
   isClosed: boolean;
   fillOpacity?: number;
+  anchorViewId?: string;
 }
 
 export type RegistrationQuality = 'GOOD' | 'DEGRADED' | 'LOST' | 'UNINITIALIZED';
 
 export interface RegistrationMetrics {
+  mode?: 'visual' | 'ptz' | 'ptz+visual' | 'uncertain' | 'simulator';
+  poseAgeMs?: number;
+  frameWidth?: number;
+  frameHeight?: number;
+  trackingHint?: string;
   quality: RegistrationQuality;
   inliers: number;
   totalMatches: number;
@@ -79,6 +85,62 @@ export interface CameraPtzPose {
   pan: number;
   tilt: number;
   zoom: number;
+  panTiltSpace?: string;
+  zoomSpace?: string;
+  moving?: boolean;
+  deviceTime?: string;
+  roll?: number; // Optional image roll in radians, supplied by a pose adapter
+}
+
+export interface PtzCapabilities {
+  configurationToken?: string;
+  panTiltSpace?: string;
+  zoomSpace?: string;
+  panRange?: [number, number];
+  tiltRange?: [number, number];
+  zoomRange?: [number, number];
+  nodeToken?: string;
+  continuousPanTiltSpace?: string;
+  continuousZoomSpace?: string;
+  continuousPanRange?: [number, number];
+  continuousTiltRange?: [number, number];
+  continuousZoomRange?: [number, number];
+  homeSupported?: boolean;
+}
+
+/** Calibration uses camera-to-world yaw/pitch and square pixels. Focal length is in image widths. */
+export interface PtzCalibration {
+  version: 1;
+  cameraKey: string;
+  panRadiansPerUnit: number;
+  tiltRadiansPerUnit: number;
+  tiltOffsetRadians: number;
+  panPeriod: number;
+  principalX: number;
+  principalY: number;
+  radialK1: number;
+  zoomPoints: Array<{ zoom: number; focal: number }>;
+  aspect: number;
+  rmsErrorPx: number;
+  validated: boolean;
+  videoDelayMs: number;
+  useCaptureTime: boolean;
+  videoDelayByTransport?: Partial<Record<'webrtc' | 'hls', number>>;
+  imageRotationDegrees?: 0 | 90 | 180 | 270;
+  /** Optional camera-specific image flip rule in reported tilt units. */
+  autoFlip?: { tiltThreshold: number; above: boolean };
+  updatedAt: string;
+}
+
+export interface ReferenceView {
+  id: string;
+  image: string;
+  width?: number;
+  height?: number;
+  ptzPose?: CameraPtzPose;
+  cameraKey?: string;
+  capturedAt?: number;
+  simulatorPose?: { panX: number; tiltY: number; zoom: number; jitter: number; time: number; flirThermal: boolean; autoPatrol: boolean };
 }
 
 export interface OnvifCameraConfig {
@@ -89,6 +151,8 @@ export interface OnvifCameraConfig {
   username: string;
   password: string;
   profileToken?: string;
+  transport?: 'webrtc' | 'hls';
+  calibration?: PtzCalibration;
 }
 
 export interface OnvifMediaProfile {
@@ -98,6 +162,13 @@ export interface OnvifMediaProfile {
   height: number;
   encoding: string;
   frameRate: number;
+  bitrate?: number;
+  encoderToken?: string;
+  crop?: { x: number; y: number; width: number; height: number };
+  ptz?: PtzCapabilities;
+  h264Profile?: string;
+  keyframeInterval?: number;
+  pixelAspect?: number;
 }
 
 export type VideoSourceType = 'simulator' | 'rear_camera' | 'webcam' | 'rtsp' | 'onvif';
@@ -115,6 +186,15 @@ export interface CameraConfig {
 }
 
 export interface RegistrationSettings {
+  processingLongEdge?: number;
+  ptzResidualLimitPx?: number;
+  poseMaxAgeMs?: number;
+  visualSearchViews?: number;
+  descriptorIntervalFrames?: number;
+  residualHoldMs?: number;
+  residualDecayMs?: number;
+  transformMaxAgeMs?: number;
+  maxAutoKeyframes?: number;
   enabled: boolean;
   maxFeatures: number;
   fastThreshold?: number; // Lower values detect more FAST corners
@@ -145,6 +225,8 @@ export interface OverlaySettings {
 }
 
 export interface ScenarioData {
+  coordinate_space?: 'normalized-source';
+  anchor_dimensions?: [number, number];
   version: number;
   scenario_name: string;
   description?: string;
@@ -152,6 +234,10 @@ export interface ScenarioData {
   camera: {
     rtsp_url: string;
     resolution: [number, number];
+    source_type?: VideoSourceType;
+    device_id?: string;
+    camera_key?: string;
+    profile_token?: string;
   };
   features: Array<{
     id: string;
@@ -175,5 +261,5 @@ export interface ScenarioData {
     min_inliers: number;
   };
   reference_image?: string; // base64 data URL
-  reference_views?: Array<{ id: string; image: string; ptzPose?: CameraPtzPose }>;
+  reference_views?: ReferenceView[];
 }

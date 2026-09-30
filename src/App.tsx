@@ -14,8 +14,17 @@ import {
   CameraPtzPose,
   OnvifCameraConfig,
   OnvifMediaProfile,
+  ReferenceView,
+  PtzCalibration,
 } from './types';
-import { VisualRegistrationEngine } from './cv/registrationEngine';
+import { registrationSettings } from './cv/registrationDefaults';
+import { processingSize } from './cv/frameGeometry';
+import { PoseTimeline } from './video/poseTimeline';
+import { connectWebRtc } from './video/webrtc';
+import { cameraIdentity } from './video/cameraIdentity';
+import { PtzCalibrationPanel } from './components/PtzCalibrationPanel';
+import { RegistrationRuntime } from './cv/registrationRuntime';
+import { frameTimestamp } from './video/frameTiming';
 import { TacticalCanvas } from './components/TacticalCanvas';
 import { Toolbar } from './components/Toolbar';
 import { StatusBar } from './components/StatusBar';
@@ -36,8 +45,11 @@ import {
 } from './components/ExerciseTerrainRenderer';
 import { FEATURE_LIBRARY } from './data/featureDefinitions';
 
-async function requestOnvif<T = any>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch(path, body === undefined ? { cache: 'no-store' } : {
+async function requestOnvif<T = any>(path: string, body?: unknown, signal?:AbortSignal): Promise<T> {
+  const timeout=AbortSignal.timeout(20000);
+  const requestSignal=signal?AbortSignal.any([signal,timeout]):timeout;
+  const response = await fetch(path, body === undefined ? { cache: 'no-store',signal:requestSignal } : {
+    signal:requestSignal,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -50,7 +62,18 @@ async function requestOnvif<T = any>(path: string, body?: unknown): Promise<T> {
 
 export default function App() {
   // Visual Registration CV Engine Instance
-  const engineRef = useRef<VisualRegistrationEngine>(new VisualRegistrationEngine());
+  const engineRef = useRef<RegistrationRuntime>(null!);
+  if(!engineRef.current)engineRef.current=new RegistrationRuntime();
+  const restoreEpochRef=useRef(0);
+  const retryCountRef=useRef(0);
+  const [anchorsNeedingPlacement,setAnchorsNeedingPlacement]=useState<string[]>([]);
+  const [replacementAnchorId,setReplacementAnchorId]=useState('');
+  const [decodedSize,setDecodedSize]=useState<[number,number]|null>(null);
+  const decodedAspectRef=useRef<number|null>(null);
+  const [calibrations,setCalibrations]=useState<Record<string,PtzCalibration>>(()=>{
+    try{const bank=JSON.parse(localStorage.getItem('vaas_ptz_calibrations')||'{}');return bank&&typeof bank==='object'&&!Array.isArray(bank)?bank:{};}catch{return {};}
+  });
+  useEffect(()=>()=>{restoreEpochRef.current++;engineRef.current.dispose();},[]);
   const cvCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const cvTerrainRendererRef = useRef<ExerciseTerrainRenderer>(new ExerciseTerrainRenderer());
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
@@ -69,12 +92,12 @@ export default function App() {
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
   const [isVideoReady, setIsVideoReady] = useState(false);
   const [registrationSetup, setRegistrationSetup] = useState(true);
-  const [setupViews, setSetupViews] = useState<Array<{ id: string; image: string; ptzPose?: CameraPtzPose }>>([]);
+  const [setupViews, setSetupViews] = useState<ReferenceView[]>([]);
   const [setupActiveViewId, setSetupActiveViewId] = useState<string | null>(null);
   const [setupSnapshot, setSetupSnapshot] = useState<string | null>(null);
   const [onvifConfig, setOnvifConfig] = useState<OnvifCameraConfig>(() => {
     const defaults: OnvifCameraConfig = {
-      host: '', port: 80, rtspPort: 554, endpointPath: '/onvif/device_service', username: '', password: '',
+      host: '', port: 80, rtspPort: 554, transport: 'webrtc', endpointPath: '/onvif/device_service', username: '', password: '',
     };
     try {
       const saved = localStorage.getItem('vaas_onvif_camera_config');
@@ -85,7 +108,7 @@ export default function App() {
   });
   const [onvifDraft, setOnvifDraft] = useState<OnvifCameraConfig>(() => {
     const defaults: OnvifCameraConfig = {
-      host: '', port: 80, rtspPort: 554, endpointPath: '/onvif/device_service', username: '', password: '',
+      host: '', port: 80, rtspPort: 554, transport: 'webrtc', endpointPath: '/onvif/device_service', username: '', password: '',
     };
     try {
       const saved = localStorage.getItem('vaas_onvif_camera_config');
@@ -100,6 +123,23 @@ export default function App() {
   const [onvifBusy, setOnvifBusy] = useState(false);
   const [onvifError, setOnvifError] = useState<string | null>(null);
   const [onvifStatus, setOnvifStatus] = useState('');
+  const [onvifSessionId, setOnvifSessionId] = useState('');
+  const [activeOnvifProfile, setActiveOnvifProfile] = useState<OnvifMediaProfile | null>(null);
+  const [calibrationOpen, setCalibrationOpen] = useState(false);
+  const [setupNotice, setSetupNotice] = useState('');
+  const [connectionRevision, setConnectionRevision] = useState(0);
+  const poseTimelineRef = useRef(new PoseTimeline());
+  const movingUntilRef = useRef(0);
+  const framePoseRef = useRef<CameraPtzPose | null>(null);
+  const lastFrameAtRef = useRef(0);
+  const frameCaptureTimeRef = useRef(0);
+  const cameraKey = activeOnvifProfile ? cameraIdentity(onvifConfig, activeOnvifProfile) : '';
+  const savedCalibration=calibrations[cameraKey]||(onvifConfig.calibration?.cameraKey===cameraKey?onvifConfig.calibration:null);
+  const calibration=savedCalibration&&(!decodedSize||Math.abs(decodedSize[0]/decodedSize[1]-savedCalibration.aspect)<.02)?savedCalibration:null;
+  const frameConfigRef = useRef({ calibration, cameraKey });
+  frameConfigRef.current = { calibration, cameraKey };
+  useEffect(() => { engineRef.current.configurePtz(sourceType === 'onvif' ? calibration : null, cameraKey); }, [sourceType, calibration, cameraKey]);
+
 
   // Simulator Camera PTZ State
   const [simState, setSimState] = useState<SimulatorCameraState>({
@@ -122,16 +162,19 @@ export default function App() {
   const [features, setFeatures] = useState<ExerciseFeature[]>(() =>
     DEFAULT_SCENARIOS[0].features.map((f) => ({
       ...f,
+      x: f.x / 1280, y: f.y / 720,
       visible: true,
       createdAt: Date.now(),
     }))
   );
 
+  const featuresRef=useRef(features);featuresRef.current=features;
+
   // Multi-boundary state management
   const [boundaries, setBoundaries] = useState<ExerciseBoundary[]>(() => {
     const sc = DEFAULT_SCENARIOS[0];
     if (sc.boundaries && sc.boundaries.length > 0) {
-      return sc.boundaries.map((b) => ({ ...b, visible: b.visible !== false }));
+      return sc.boundaries.map((b) => ({ ...b, points: b.points.map(([x,y]) => [x/1280,y/720] as BoundaryPoint), visible: b.visible !== false }));
     }
     return [
       {
@@ -139,7 +182,7 @@ export default function App() {
         name: sc.boundary_config?.name || 'CRIMSON EXERCISE PERIMETER',
         color: sc.boundary_config?.color || '#ef4444',
         thickness: sc.boundary_config?.thickness || 3,
-        points: sc.boundary || [],
+        points: (sc.boundary || []).map(([x,y]) => [x/1280,y/720]),
         isClosed: sc.boundary_config?.closed ?? false,
         fillOpacity: sc.boundary_config?.fillOpacity ?? 0.08,
         visible: true,
@@ -152,7 +195,7 @@ export default function App() {
   });
   const [activeDrawingBoundaryId, setActiveDrawingBoundaryId] = useState<string | null>(null);
 
-  const [boundary, setBoundary] = useState<BoundaryPoint[]>(DEFAULT_SCENARIOS[0].boundary || []);
+  const [boundary, setBoundary] = useState<BoundaryPoint[]>((DEFAULT_SCENARIOS[0].boundary || []).map(([x,y])=>[x/1280,y/720]));
   const [boundaryConfig, setBoundaryConfig] = useState<BoundaryConfig>(() => {
     return (
       DEFAULT_SCENARIOS[0].boundary_config || {
@@ -184,8 +227,8 @@ export default function App() {
     candidateKeypointsCur: 0,
     reprojectionError: 0,
     homography: [1, 0, 0, 0, 1, 0, 0, 0, 1],
-    fps: 30,
-    processingTimeMs: 4.2,
+    fps: 0,
+    processingTimeMs: 0,
     scaleEstimate: 1,
     rotationEstimateDeg: 0,
     translationEstimate: [0, 0],
@@ -200,20 +243,10 @@ export default function App() {
     reconnectIntervalSec: 5,
   });
 
-  const [regSettings, setRegSettings] = useState<RegistrationSettings>({
-    enabled: true,
-    maxFeatures: 360,
-    fastThreshold: 16,
-    matchRatioThreshold: 0.78,
-    ransacThresholdPx: 4.5,
-    minInliers: 8,
-    ransacIterations: 300,
-    lostFrameToleranceFrames: 12,
-    smoothingFactor: 0.5,
-    leastSquaresRefine: true,
-    adaptiveReference: false,
-    updateIntervalMs: 33,
+  const [regSettings,setRegSettings]=useState<RegistrationSettings>(()=>{
+    try{return registrationSettings(JSON.parse(localStorage.getItem('vaas_registration_settings')||'{}'));}catch{return registrationSettings();}
   });
+  const updateRegSettings=(value:RegistrationSettings)=>setRegSettings(registrationSettings(value));
 
   const [overlaySettings, setOverlaySettings] = useState<OverlaySettings>({
     symbolScale: 1.0,
@@ -308,10 +341,10 @@ export default function App() {
 
   // Sync Reg Settings with Engine
   useEffect(() => {
-    engineRef.current.settings = { ...regSettings };
+    engineRef.current.settings = registrationSettings(regSettings);
   }, [regSettings]);
 
-  // Setup Offscreen Canvas for Computer Vision Frame Extraction (640x360 for high FPS)
+  // Create the aspect-preserving source frame canvas for registration
   useEffect(() => {
     const cvCanvas = document.createElement('canvas');
     cvCanvas.width = 640;
@@ -400,7 +433,7 @@ export default function App() {
               console.warn('Camera fallback stream error:', fallbackErr);
               alert('Unable to access camera device. Switching back to Exercise Feed Simulator.');
               setSourceType('simulator');
-              setRegistrationSetup(false);
+              setRegistrationSetup(true);
             });
         });
     } else {
@@ -457,7 +490,12 @@ export default function App() {
   const handleOnvifSaveAndConnect = useCallback(() => {
     try {
       localStorage.setItem('vaas_onvif_camera_config', JSON.stringify(onvifDraft));
+      if(JSON.stringify([onvifDraft.host,onvifDraft.port,onvifDraft.profileToken])!==JSON.stringify([onvifConfig.host,onvifConfig.port,onvifConfig.profileToken])){
+        restoreEpochRef.current++;engineRef.current.reset();setSetupViews([]);setRegistrationSetup(true);setSetupActiveViewId(null);setSetupSnapshot(null);
+        requireAnchorPlacement();setCalibrationOpen(false);setActiveOnvifProfile(null);decodedAspectRef.current=null;setDecodedSize(null);
+      }
       setOnvifConfig(onvifDraft);
+      setConnectionRevision(v=>v+1);
       setOnvifError(null);
       setIsOnvifSetupOpen(false);
       setOnvifStatus('Connecting…');
@@ -465,7 +503,7 @@ export default function App() {
     } catch {
       setOnvifError('The browser could not save this camera configuration locally.');
     }
-  }, [onvifDraft]);
+  }, [onvifDraft,onvifConfig,features]);
 
   const handleOpenOnvifSetup = () => {
     setOnvifDraft({ ...onvifConfig });
@@ -480,8 +518,45 @@ export default function App() {
     if (sourceType === 'onvif' && onvifConfig.host.trim()) setIsConnected(true);
   };
 
+  const requireAnchorPlacement=()=>{
+    const ids=featuresRef.current.filter(f=>f.anchorViewId).map(f=>f.id);
+    setAnchorsNeedingPlacement(ids);
+    setFeatures(current=>current.map(f=>f.anchorViewId?{...f,anchorViewId:'needs-recapture'}:f));
+    setBoundaries(current=>current.map(b=>b.points.length?{...b,anchorViewId:'needs-recapture'}:b));
+  };
+  const resetCameraReferences=()=>{
+    requireAnchorPlacement();
+    restoreEpochRef.current++;poseTimelineRef.current.clear();framePoseRef.current=null;lastFrameAtRef.current=0;
+    decodedAspectRef.current=null;setDecodedSize(null);setSetupViews([]);setSetupActiveViewId(null);setSetupSnapshot(null);setRegistrationSetup(true);
+    setPendingFeatureType(null);setReplacementAnchorId('');
+    engineRef.current.reset();
+  };
+  useEffect(()=>{
+    if(!videoElement)return;
+    const geometry=()=>{
+      const w=videoElement.videoWidth,h=videoElement.videoHeight;if(!w||!h)return;
+      const aspect=w/h,previous=decodedAspectRef.current;
+      if(previous!==null&&Math.abs(previous-aspect)>.02){
+        restoreEpochRef.current++;engineRef.current.reset();setSetupViews([]);setSetupActiveViewId(null);setSetupSnapshot(null);setRegistrationSetup(true);
+        requireAnchorPlacement();setSetupNotice('The stream aspect ratio changed. Capture new anchor views and update PTZ calibration for this image geometry.');
+      }
+      decodedAspectRef.current=aspect;setDecodedSize([w,h]);
+    };
+    videoElement.addEventListener('loadedmetadata',geometry);videoElement.addEventListener('resize',geometry);geometry();
+    return()=>{videoElement.removeEventListener('loadedmetadata',geometry);videoElement.removeEventListener('resize',geometry);};
+  },[videoElement]);
+  useEffect(()=>{
+    if(sourceType==='onvif'&&cameraKey&&setupViews.some(v=>v.cameraKey&&v.cameraKey!==cameraKey)){
+      resetCameraReferences();setSetupNotice('The selected camera profile differs from the saved anchor views. Capture new views and re-place their anchors.');
+    }
+  },[sourceType,cameraKey,setupViews]);
   const handleChangeSourceType = (type: VideoSourceType) => {
+    resetCameraReferences();retryCountRef.current=0;
+    setActiveOnvifProfile(null);
     setSourceType(type);
+    setCalibrationOpen(false);
+    setSetupNotice('');
+    poseTimelineRef.current.clear();
     setIsVideoReady(false);
     setRegistrationSetup(true);
     setSetupViews([]);
@@ -514,8 +589,17 @@ export default function App() {
     }
   };
 
+  const changeRtspUrl=(url:string)=>{
+    if(url!==rtspUrl&&sourceType==='rtsp')resetCameraReferences();
+    setRtspUrl(url);setCameraConfig(current=>({...current,rtspUrl:url}));
+  };
+  const updateCameraConfig=(config:CameraConfig)=>{
+    if(config.rtspUrl!==rtspUrl)changeRtspUrl(config.rtspUrl);
+    setCameraConfig(config);
+  };
   const sendOnvifPtz = (command: { action?: 'stop' | 'home'; pan?: number; tilt?: number; zoom?: number }) => {
-    void requestOnvif('/api/onvif/ptz', command).catch((error) => {
+    movingUntilRef.current = performance.now() + 2000;
+    void requestOnvif('/api/onvif/ptz', { ...command, sessionId: onvifSessionId }).catch((error) => {
       setOnvifError(error instanceof Error ? error.message : 'ONVIF PTZ command failed.');
     });
   };
@@ -529,113 +613,94 @@ export default function App() {
     sendOnvifPtz({ pan: 0, tilt: 0, zoom: Math.sign(delta) * Math.min(0.04, Math.abs(delta) * 0.25) });
   };
 
+  const connectionKey = JSON.stringify([onvifConfig.host,onvifConfig.port,onvifConfig.rtspPort,onvifConfig.endpointPath,
+    onvifConfig.username,onvifConfig.password,onvifConfig.profileToken,onvifConfig.transport]);
   useEffect(() => {
-    if (sourceType !== 'onvif' || !isConnected) return;
-    let cancelled = false;
+    if (!['onvif','rtsp'].includes(sourceType) || !isConnected) return;
+    const controller = new AbortController();
+    let cancelled = false, sessionId = '',failed=false;
     let video: HTMLVideoElement | null = null;
     let hls: import('hls.js').default | null = null;
-    setOnvifError(null);
-    setOnvifStatus('Connecting to ONVIF camera…');
-
+    let pc: RTCPeerConnection | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    setIsVideoReady(false);setDecodedSize(null); setOnvifError(null); setOnvifStatus('Connecting to camera…');
+    poseTimelineRef.current.clear(); framePoseRef.current=null; lastFrameAtRef.current=0;
+    const fail = (message:string) => {
+      if(cancelled||failed)return;failed=true;
+      setIsVideoReady(false);setOnvifError(message);setOnvifStatus('Video unavailable');
+      poseTimelineRef.current.clear();framePoseRef.current=null;
+      clearTimeout(retryTimer);
+      const delay=Math.min(30000,Math.max(1000,cameraConfig.reconnectIntervalSec*1000)*2**Math.min(4,retryCountRef.current++));
+      retryTimer=setTimeout(()=>setConnectionRevision(v=>v+1),delay);
+    };
     const connect = async () => {
       try {
         const result = await requestOnvif<{
-          device: { manufacturer: string; model: string };
-          profile: OnvifMediaProfile;
-          profiles: OnvifMediaProfile[];
-          streamPath: string;
-        }>('/api/onvif/connect', onvifConfig);
-        if (cancelled) return;
-        setOnvifProfiles(result.profiles);
-        setOnvifDeviceName([result.device.manufacturer, result.device.model].filter(Boolean).join(' ') || 'ONVIF PTZ camera');
-        if (result.profile.token && result.profile.token !== onvifConfig.profileToken) {
-          const savedConfig = { ...onvifConfig, profileToken: result.profile.token };
-          setOnvifConfig(savedConfig);
-          setOnvifDraft(savedConfig);
-          localStorage.setItem('vaas_onvif_camera_config', JSON.stringify(savedConfig));
+          device?: { manufacturer:string;model:string }; profile?:OnvifMediaProfile;profiles?:OnvifMediaProfile[];
+          transport:'webrtc'|'hls';sessionId:string;streamPath:string;
+        }>(sourceType==='onvif'?'/api/onvif/connect':'/api/onvif/rtsp',sourceType==='onvif'?onvifConfig:{url:rtspUrl},controller.signal);
+        sessionId=result.sessionId;
+        if(cancelled){void requestOnvif('/api/onvif/disconnect',{sessionId}).catch(()=>{});return;}
+        setOnvifSessionId(sessionId);
+        if(result.profiles)setOnvifProfiles(result.profiles);
+        if(result.profile)setActiveOnvifProfile(result.profile);
+        if(result.device)setOnvifDeviceName([result.device.manufacturer,result.device.model].filter(Boolean).join(' '));
+        video=document.createElement('video');video.autoplay=true;video.playsInline=true;video.muted=true;
+        const ready=()=>{if(!cancelled&&video!.videoWidth>0&&video!.videoHeight>0){
+          const w=video!.videoWidth,h=video!.videoHeight;
+          setDecodedSize([w,h]);retryCountRef.current=0;failed=false;clearTimeout(retryTimer);
+          setIsVideoReady(true);setOnvifError(null);setOnvifStatus(`Connected · ${w}×${h} · ${result.transport.toUpperCase()}`);
+        }};
+        video.addEventListener('loadeddata',ready);video.addEventListener('playing',ready);video.addEventListener('resize',ready);
+        videoElementRef.current=video;setVideoElement(video);
+        if(result.transport==='webrtc')pc=await connectWebRtc(video,sessionId,controller.signal,fail);
+        else {
+          const HlsPlayer=(await import('hls.js/light')).default;
+          if(cancelled)return;
+          if(HlsPlayer.isSupported()){
+            hls=new HlsPlayer({enableWorker:true,liveSyncDurationCount:2});hls.loadSource(result.streamPath);hls.attachMedia(video);
+            hls.on(HlsPlayer.Events.MANIFEST_PARSED,()=>{void video?.play().catch(()=>{});});
+            hls.on(HlsPlayer.Events.ERROR,(_event,data)=>{if(data.fatal)fail(`Video relay error: ${data.details}`);});
+          }else if(video.canPlayType('application/vnd.apple.mpegurl')){video.src=result.streamPath;await video.play();}
+          else throw new Error('This browser cannot play HLS. Select WebRTC in camera setup.');
         }
-
-        video = document.createElement('video');
-        video.autoplay = true;
-        video.playsInline = true;
-        video.muted = true;
-        const markVideoReady = () => setIsVideoReady(true);
-        video.addEventListener('loadeddata', markVideoReady);
-        video.addEventListener('playing', markVideoReady);
-        videoElementRef.current = video;
-        setVideoElement(video);
-
-        const HlsPlayer = (await import('hls.js/light')).default;
-        if (HlsPlayer.isSupported()) {
-          const player = new HlsPlayer({ enableWorker: true, lowLatencyMode: true, liveSyncDurationCount: 2 });
-          hls = player;
-          player.loadSource(result.streamPath);
-          player.attachMedia(video);
-          player.on(HlsPlayer.Events.MANIFEST_PARSED, () => { void video?.play().catch(() => {}); });
-          player.on(HlsPlayer.Events.ERROR, (_event, data) => {
-            if (data.fatal) {
-              setOnvifError(`Video relay error: ${data.details}`);
-              setOnvifStatus('Video relay error');
-            }
-          });
-        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-          video.src = result.streamPath;
-          await video.play().catch(() => {});
-        } else {
-          throw new Error('This browser cannot play the camera relay. Use a browser with HLS support.');
-        }
-        setOnvifStatus(`Connected · ${result.profile.width}×${result.profile.height} ${result.profile.encoding}`);
-      } catch (error) {
-        if (cancelled) return;
-        setOnvifError(error instanceof Error ? error.message : 'Could not connect to the ONVIF camera.');
-        setOnvifStatus('Connection failed');
-        setIsConnected(false);
-      }
+      }catch(error){if(!cancelled)fail(error instanceof Error?error.message:'Camera connection failed.');}
     };
-
     void connect();
     return () => {
-      cancelled = true;
-      hls?.destroy();
-      if (video) {
-        setIsVideoReady(false);
-        video.pause();
-        video.removeAttribute('src');
-        video.load();
-      }
-      if (videoElementRef.current === video) videoElementRef.current = null;
-      setVideoElement((current) => current === video ? null : current);
-      void requestOnvif('/api/onvif/disconnect', {}).catch(() => {});
+      cancelled=true;controller.abort();clearTimeout(retryTimer);pc?.close();hls?.destroy();
+      setOnvifSessionId('');poseTimelineRef.current.clear();framePoseRef.current=null;
+      if(video){video.pause();video.srcObject=null;video.removeAttribute('src');video.load();}
+      if(videoElementRef.current===video)videoElementRef.current=null;
+      setVideoElement(current=>current===video?null:current);
+      if(sessionId)void requestOnvif('/api/onvif/disconnect',{sessionId}).catch(()=>{});
     };
-  }, [sourceType, isConnected]);
+  }, [sourceType,isConnected,connectionKey,connectionRevision,rtspUrl]);
 
   useEffect(() => {
-    if (sourceType !== 'onvif' || !isConnected) return;
-    let cancelled = false;
-    let polling = false;
-    const refreshPose = async () => {
-      if (polling) return;
-      polling = true;
-      try {
-        const result = await requestOnvif<{ ptzPose: CameraPtzPose | null }>('/api/onvif/status');
-        if (cancelled) return;
-        onvifPoseRef.current = result.ptzPose;
-        engineRef.current.setCameraPoseHint(result.ptzPose);
-      } catch {
-        // Visual matching remains active during brief camera telemetry gaps.
-      } finally {
-        polling = false;
-      }
+    if(sourceType!=='onvif'||!isConnected||!onvifSessionId)return;
+    let cancelled=false;const controller=new AbortController();
+    let timer:ReturnType<typeof setTimeout>;
+    const poll=async()=>{
+      const start=performance.now();let moving=true;
+      try{
+        const result=await requestOnvif<{ptzPose:CameraPtzPose|null;connected:boolean;requestedAt:number;receivedAt:number}>(`/api/onvif/status?sessionId=${encodeURIComponent(onvifSessionId)}`,undefined,controller.signal);
+        const end=performance.now();
+        if(cancelled)return;
+        onvifPoseRef.current=result.ptzPose;
+        if(result.connected&&result.ptzPose){
+          const cameraDuration=result.receivedAt-result.requestedAt;
+          poseTimelineRef.current.pushStatus(result.ptzPose,start,end,cameraDuration);
+          const previous=poseTimelineRef.current.sample(start,frameConfigRef.current.calibration?.panPeriod??2,2000)?.pose;
+          const changed=previous&&Math.hypot(result.ptzPose.pan-previous.pan,result.ptzPose.tilt-previous.tilt,result.ptzPose.zoom-previous.zoom)>.0001;
+          moving=result.ptzPose.moving===true||!!changed||performance.now()<movingUntilRef.current;
+        }else{poseTimelineRef.current.clear();framePoseRef.current=null;engineRef.current.setFramePose(null);}
+      }catch{if(!cancelled){onvifPoseRef.current=null;poseTimelineRef.current.clear();framePoseRef.current=null;engineRef.current.setFramePose(null);}}
+      if(!cancelled)timer=setTimeout(poll,Math.max(20,(moving?100:250)-(performance.now()-start)));
     };
-    void refreshPose();
-    const timer = window.setInterval(refreshPose, 1000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-      onvifPoseRef.current = null;
-      engineRef.current.setCameraPoseHint(null);
-    };
-  }, [sourceType, isConnected]);
+    void poll();
+    return()=>{cancelled=true;controller.abort();clearTimeout(timer);poseTimelineRef.current.clear();onvifPoseRef.current=null;engineRef.current.setFramePose(null);};
+  },[sourceType,isConnected,onvifSessionId]);
 
   // Mobile Torch / Flashlight Toggle Handler
   const handleToggleTorch = async () => {
@@ -654,21 +719,9 @@ export default function App() {
   };
 
   // Quick Camera Facing Flip (Rear <-> Front)
-  const handleToggleCameraFacing = () => {
-    if (sourceType === 'rear_camera') {
-      setSourceType('webcam');
-      setCameraFacingMode('user');
-      setSelectedCameraDeviceId(null);
-    } else if (sourceType === 'webcam') {
-      setSourceType('rear_camera');
-      setCameraFacingMode('environment');
-      setSelectedCameraDeviceId(null);
-    } else {
-      setSourceType('rear_camera');
-      setCameraFacingMode('environment');
-      setSelectedCameraDeviceId(null);
-    }
-  };
+  const handleToggleCameraFacing=()=>handleChangeSourceType(sourceType==='rear_camera'?'webcam':'rear_camera');
+  const changeFacingMode=(mode:'user'|'environment')=>{resetCameraReferences();setCameraFacingMode(mode);};
+  const selectCameraDevice=(id:string|null)=>{resetCameraReferences();setSelectedCameraDeviceId(id);};
 
   // Set initial Reference Frame once canvas is mounted
   const captureAndSetReference = useCallback(() => {
@@ -678,42 +731,23 @@ export default function App() {
     const ctx = cvCanvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
 
-    const referenceState = { ...simStateRef.current };
-    if (sourceType === 'simulator') {
-      simulatorReferenceStateRef.current = referenceState;
-    } else {
-      simulatorReferenceStateRef.current = null;
-    }
-    engineRef.current.setExternalHomography(null);
-    if (!renderInputFrame(ctx, 640, 360, sourceType, referenceState, videoElementRef.current, cvTerrainRendererRef.current)) return;
-
-    const imgData = ctx.getImageData(0, 0, 640, 360);
-    const dataUrl = cvCanvas.toDataURL('image/jpeg', 0.85);
-    const { keypointCount } = engineRef.current.setReferenceFrame(imgData, dataUrl);
-    if (sourceType === 'simulator') {
-      engineRef.current.setExternalHomography([1, 0, 0, 0, 1, 0, 0, 0, 1]);
-    }
-    console.log(`Reference frame established with ${keypointCount} features.`);
-  }, [sourceType, registrationSetup]);
-
-  // Establish initial reference frame on mount / connection
-  useEffect(() => {
-    if (isConnected && !registrationSetup && setupViews.length === 0) {
-      // Brief delay to allow canvases/video elements to initialize
-      const timer = setTimeout(() => {
-        captureAndSetReference();
-      }, 200);
-      return () => clearTimeout(timer);
-    }
-  }, [isConnected, registrationSetup, setupViews.length, captureAndSetReference]);
-
-  // The camera permission prompt and stream startup can take longer than the
-  // initial reference delay. Capture once the first decoded webcam frame exists.
-  useEffect(() => {
-    if (!registrationSetup && setupViews.length === 0 && isConnected && (sourceType === 'webcam' || sourceType === 'rear_camera') && videoElement?.readyState && videoElement.readyState >= 2) {
-      captureAndSetReference();
-    }
-  }, [registrationSetup, setupViews.length, isConnected, sourceType, videoElement, captureAndSetReference]);
+    if(performance.now()-lastFrameAtRef.current>500)return;
+    const id=engineRef.current.getCurrentMatchedView().id || engineRef.current.getAnchorViewId();
+    const affected=features.filter(f=>(f.anchorViewId||engineRef.current.getAnchorViewId())===id);
+    const projected=affected.map(f=>engineRef.current.projectAnchor(id,f.x,f.y));
+    if(affected.length&&setupViews.length&&projected.some(p=>!p)){setSetupNotice('Return to a tracked saved view before re-referencing its anchors.');return;}
+    const boundaryProjections=boundaries.filter(b=>(b.anchorViewId||engineRef.current.getAnchorViewId())===id).map(b=>({id:b.id,points:b.points.map(([x,y])=>engineRef.current.projectAnchor(id,x,y))}));
+    if(setupViews.length&&boundaryProjections.some(b=>b.points.some(p=>!p))){setSetupNotice('Return to a tracked saved view before re-referencing its boundaries.');return;}
+    if(setupViews.length)setBoundaries(current=>current.map(b=>{const projected=boundaryProjections.find(p=>p.id===b.id);return projected?{...b,points:projected.points as BoundaryPoint[]}:b;}));
+    if(setupViews.length){setFeatures(current=>current.map(f=>{const i=affected.findIndex(a=>a.id===f.id);return i>=0&&projected[i]?{...f,x:projected[i]![0],y:projected[i]![1]}:f;}));}
+    const imgData=ctx.getImageData(0,0,cvCanvas.width,cvCanvas.height),image=cvCanvas.toDataURL('image/jpeg',0.9);
+    const pose=framePoseRef.current||undefined;
+    if(!setupViews.length)engineRef.current.setReferenceFrame(imgData,image,id,pose,cameraKey);
+    else engineRef.current.addSetupKeyframe(imgData,id,image,pose,cameraKey);
+    const view:ReferenceView={id,image,width:cvCanvas.width,height:cvCanvas.height,ptzPose:pose,cameraKey,capturedAt:frameCaptureTimeRef.current,
+      simulatorPose:sourceType==='simulator'?{...simStateRef.current}:undefined};
+    setSetupViews(current=>current.length?current.map(v=>v.id===id?view:v):[view]);
+  }, [sourceType, registrationSetup, features, boundaries, setupViews, cameraKey]);
 
   const captureSetupView = useCallback(() => {
     if (setupSnapshot) return;
@@ -723,20 +757,19 @@ export default function App() {
     if (!canvas || (sourceType !== 'simulator' && (!video || !isVideoReady || video.readyState < 2))) return;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
+    if(performance.now()-lastFrameAtRef.current>500){setSetupNotice('Wait for a fresh camera frame before capturing.');return;}
     const state = { ...simStateRef.current };
-    if (!renderInputFrame(ctx, 640, 360, sourceType, state, video, cvTerrainRendererRef.current)) return;
-    const imageData = ctx.getImageData(0, 0, 640, 360);
-    const image = canvas.toDataURL('image/jpeg', 0.9);
-    const id = `setup-view-${Date.now()}`;
-    const ptzPose = sourceType === 'onvif' ? onvifPoseRef.current || undefined : undefined;
-    if (sourceType === 'simulator' && setupViews.length === 0) {
-      simulatorReferenceStateRef.current = state;
-    }
-    engineRef.current.addSetupKeyframe(imageData, id, image, ptzPose);
-    setSetupViews((views) => [...views, { id, image, ptzPose }]);
+    const imageData=ctx.getImageData(0,0,canvas.width,canvas.height);
+    const image=canvas.toDataURL('image/jpeg',0.9),id=`setup-view-${Date.now()}`;
+    const ptzPose=sourceType==='onvif'?framePoseRef.current||undefined:undefined;
+    if(sourceType==='onvif'&&!ptzPose){setSetupNotice('Wait for fresh camera position data before capturing this view.');return;}
+    setSetupNotice('');
+    engineRef.current.addSetupKeyframe(imageData,id,image,ptzPose,cameraKey);
+    setSetupViews(views=>[...views,{id,image,ptzPose,cameraKey,width:canvas.width,height:canvas.height,capturedAt:frameCaptureTimeRef.current,
+      simulatorPose:sourceType==='simulator'?state:undefined}]);
     setSetupActiveViewId(id);
     setSetupSnapshot(image);
-  }, [sourceType, setupViews.length, setupSnapshot, setupActiveViewId, features, isVideoReady]);
+  }, [sourceType, setupViews.length, setupSnapshot, setupActiveViewId, features, isVideoReady, cameraKey]);
 
   const finishSetupView = useCallback(() => {
     if (!setupActiveViewId || !features.some((feature) => feature.anchorViewId === setupActiveViewId)) return;
@@ -744,74 +777,77 @@ export default function App() {
   }, [features, setupActiveViewId]);
 
   const finishRegistrationSetup = useCallback(() => {
-    const everyViewAnchored = setupViews.length >= 2 && setupViews.every((view) =>
+    if(anchorsNeedingPlacement.length)return;
+    const everyViewAnchored = setupViews.length >= 1 && setupViews.every((view) =>
       features.some((feature) => feature.anchorViewId === view.id)
     );
     if (!everyViewAnchored || setupSnapshot) return;
     setRegistrationSetup(false);
     setSetupSnapshot(null);
-  }, [features, setupViews, setupSnapshot]);
+  }, [features, setupViews, setupSnapshot,anchorsNeedingPlacement.length]);
 
-  // Synchronize Registration Settings into the CV Engine
+  useEffect(()=>{try{localStorage.setItem('vaas_registration_settings',JSON.stringify(regSettings));}catch{}},[regSettings]);
+
+  // Decode-driven sampling: the pose, CV image and setup capture refer to the same frame.
   useEffect(() => {
-    engineRef.current.settings = { ...regSettings };
-  }, [regSettings]);
-
-  // Main CV Processing Loop (at 30 FPS)
-  useEffect(() => {
-    if (!isConnected || registrationSetup) return;
-
-    let intervalId: number;
-    let autoPatrolAngle = 0;
-
-    const processCVFrame = () => {
-      const cvCanvas = cvCanvasRef.current;
-      if (!cvCanvas) return;
-      const ctx = cvCanvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) return;
-
-      // Advance synthetic PTZ only for the simulator. Live sources may provide
-      // decoded video frames, but their camera pose is not guessed here.
-      let frameSimState = simStateRef.current;
-      if (sourceType === 'simulator') {
-        const currentSimState = simStateRef.current;
-        const nextSimState: SimulatorCameraState = {
-          ...currentSimState,
-          time: currentSimState.time + (regSettings.updateIntervalMs || 33),
-        };
-        if (currentSimState.autoPatrol) {
-          autoPatrolAngle += 0.02;
-          nextSimState.panX = Math.sin(autoPatrolAngle) * 120;
-        }
-        simStateRef.current = nextSimState;
-        frameSimState = nextSimState;
-        setSimState(nextSimState);
+    if(!isConnected)return;
+    let cancelled=false,timer:ReturnType<typeof setTimeout>,callbackId=0,lastProcessed=0,lastMediaTime=-1;
+    const video=videoElement;
+    const processFrame=(now:number,metadata?:VideoFrameCallbackMetadata)=>{
+      if(cancelled)return;
+      const canvas=cvCanvasRef.current;if(!canvas)return;
+      if(sourceType!=='simulator'&&(!video||video.readyState<2))return;
+      if(now-lastProcessed<(regSettings.updateIntervalMs||33)-2)return;
+      if(metadata&&metadata.mediaTime===lastMediaTime)return;
+      lastMediaTime=metadata?.mediaTime??-1;lastProcessed=now;
+      let state=simStateRef.current;
+      if(sourceType==='simulator'){
+        state={...state,time:state.time+(regSettings.updateIntervalMs||33)};
+        if(state.autoPatrol)state.panX=Math.sin(state.time*0.0005)*120;
+        simStateRef.current=state;setSimState(state);
       }
-
-      if (!renderInputFrame(ctx, 640, 360, sourceType, frameSimState, videoElementRef.current, cvTerrainRendererRef.current)) {
-        // No fresh decoded frame: never feed stale canvas pixels to registration.
-        engineRef.current.setExternalHomography(null);
-        return;
+      const [w,h]=sourceType==='simulator'?[640,360]:processingSize(video!.videoWidth,video!.videoHeight,regSettings.processingLongEdge);
+      if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
+      const ctx=canvas.getContext('2d',{willReadFrequently:true});if(!ctx)return;
+      if(!renderInputFrame(ctx,w,h,sourceType,state,video,cvTerrainRendererRef.current))return;
+      const {calibration:cal}=frameConfigRef.current;
+      const frameTime=frameTimestamp(now,metadata,cal,onvifConfig.transport||'webrtc');
+      const sample=sourceType==='onvif'?poseTimelineRef.current.sample(frameTime,cal?.panPeriod??2,regSettings.poseMaxAgeMs??400):null;
+      framePoseRef.current=sample?.pose||null;frameCaptureTimeRef.current=performance.timeOrigin+frameTime;lastFrameAtRef.current=now;
+      engineRef.current.setFramePose(sample?.pose||null,sample?.ageMs);
+      if(registrationSetup)return;
+      if(!setupViews.length){
+        const image=canvas.toDataURL('image/jpeg',0.9),id='anchor-view-1';
+        engineRef.current.setReferenceFrame(ctx.getImageData(0,0,w,h),image,id,sample?.pose,frameConfigRef.current.cameraKey);
+        setSetupViews([{id,image,width:w,height:h,ptzPose:sample?.pose,cameraKey:frameConfigRef.current.cameraKey,
+          simulatorPose:sourceType==='simulator'?state:undefined}]);
       }
-
-      const imgData = ctx.getImageData(0, 0, 640, 360);
-      const metrics = engineRef.current.processFrame(imgData);
-      const simulatorReference = simulatorReferenceStateRef.current;
-      if (sourceType === 'simulator' && simulatorReference && setupViews.length <= 1) {
-        // The simulator exposes exact PTZ state. Use its known camera transform
-        // for stable overlays while retaining CV metrics as diagnostics.
-        const knownTransform = getSimulatorHomography(simulatorReference, frameSimState);
-        engineRef.current.setExternalHomography(knownTransform);
-        metrics.homography = knownTransform;
-      } else {
-        engineRef.current.setExternalHomography(null);
-      }
-      setRegistrationMetrics(metrics);
+      if(sourceType==='simulator')engineRef.current.setExternalViews(new Map(setupViews.filter(v=>v.simulatorPose).map(v=>[v.id,getSimulatorHomography(v.simulatorPose!,state)])));
+      else engineRef.current.setExternalHomography(null);
+      const pixels=ctx.getImageData(0,0,w,h);
+      void engineRef.current.processFrameAsync(pixels,now).then(metrics=>{
+        if(!cancelled&&metrics)setRegistrationMetrics(metrics);
+      }).catch(error=>{if(!cancelled)setSetupNotice(error instanceof Error?error.message:'Visual registration could not process this frame.');});
     };
+    const callback=(now:number,metadata:VideoFrameCallbackMetadata)=>{processFrame(now,metadata);if(!cancelled)callbackId=video!.requestVideoFrameCallback(callback);};
+    const tick=()=>{processFrame(performance.now());timer=setTimeout(tick,regSettings.updateIntervalMs||33);};
+    if(sourceType!=='simulator'&&video?.requestVideoFrameCallback)callbackId=video.requestVideoFrameCallback(callback);
+    else if(sourceType==='simulator')tick();
+    else if(video){const fallback=()=>{if(video.currentTime!==lastMediaTime){lastMediaTime=video.currentTime;processFrame(performance.now());}timer=setTimeout(fallback,33);};fallback();}
+    return()=>{cancelled=true;clearTimeout(timer);if(callbackId)video?.cancelVideoFrameCallback(callbackId);};
+  },[isConnected,registrationSetup,sourceType,videoElement,setupViews,regSettings.updateIntervalMs,regSettings.processingLongEdge,regSettings.poseMaxAgeMs,onvifConfig.transport]);
 
-    intervalId = window.setInterval(processCVFrame, regSettings.updateIntervalMs || 33);
-    return () => clearInterval(intervalId);
-  }, [isConnected, registrationSetup, sourceType, setupViews.length, regSettings.updateIntervalMs]);
+  useEffect(()=>{
+    if(!isConnected||sourceType==='simulator')return;
+    const timer=setInterval(()=>{if(lastFrameAtRef.current&&performance.now()-lastFrameAtRef.current>1000){
+      framePoseRef.current=null;engineRef.current.setFramePose(null);
+      setRegistrationMetrics(m=>({...m,quality:'LOST',mode:'uncertain',fps:0}));
+      if(['onvif','rtsp'].includes(sourceType)&&!document.hidden&&performance.now()-lastFrameAtRef.current>5000){
+        lastFrameAtRef.current=0;setConnectionRevision(v=>v+1);
+      }
+    }},500);
+    return()=>clearInterval(timer);
+  },[isConnected,sourceType]);
 
   // Feature Placement Handler
   const handleSelectFeatureForPlacement = (
@@ -820,6 +856,7 @@ export default function App() {
     rotation: number,
     options?: CustomPlacementOptions
   ) => {
+    setReplacementAnchorId('');
     setPendingFeatureType(type);
     setPendingFeatureLabel(label);
     setPendingFeatureRotation(rotation);
@@ -833,7 +870,7 @@ export default function App() {
     const currentMatch = engineRef.current.getCurrentMatchedView();
     const anchorViewId = registrationSetup
       ? setupActiveViewId
-      : currentMatch.independent ? currentMatch.id : undefined;
+      : currentMatch.id || engineRef.current.getAnchorViewId();
     const newFeature: ExerciseFeature = {
       id: `feat_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       type: pendingFeatureType,
@@ -850,8 +887,11 @@ export default function App() {
       ...(anchorViewId ? { anchorViewId } : {}),
     };
 
-    setFeatures((prev) => [...prev, newFeature]);
-    setSelectedFeatureId(newFeature.id);
+    if(replacementAnchorId){
+      const id=replacementAnchorId;
+      setFeatures(current=>current.map(f=>f.id===id?{...newFeature,id}:f));
+      setAnchorsNeedingPlacement(current=>current.filter(value=>value!==id));setReplacementAnchorId('');setSelectedFeatureId(id);
+    }else{setFeatures((prev)=>[...prev,newFeature]);setSelectedFeatureId(newFeature.id);}
     setPendingFeatureType(null);
     setPendingFeatureLabel('');
     setPendingFeatureOptions({});
@@ -934,6 +974,7 @@ export default function App() {
       const newB: ExerciseBoundary = {
         id: `boundary_${Date.now()}`,
         name: `BOUNDARY ${boundaries.length + 1}`,
+        anchorViewId: engineRef.current.getCurrentMatchedView().id || engineRef.current.getAnchorViewId(),
         color: '#38bdf8',
         thickness: 3,
         points: [],
@@ -949,8 +990,10 @@ export default function App() {
       setActiveDrawingBoundaryId(targetId);
       setSelectedBoundaryId(targetId);
       const target = boundaries.find((b) => b.id === targetId);
-      setActiveBoundaryPoints(target?.points ? [...target.points] : []);
+      setActiveBoundaryPoints(target?.anchorViewId!=='needs-recapture'&&target?.points?[...target.points]:[]);
     }
+    const viewId=engineRef.current.getCurrentMatchedView().id||engineRef.current.getAnchorViewId();
+    if(targetId)setBoundaries(current=>current.map(b=>b.id===targetId&&(!b.points.length||b.anchorViewId==='needs-recapture')?{...b,points:[],anchorViewId:viewId}:b));
     setIsDrawingBoundary(true);
     setPendingFeatureType(null);
   };
@@ -998,7 +1041,7 @@ export default function App() {
   };
 
   const handleClearAll = () => {
-    setFeatures([]);
+    setFeatures([]);setAnchorsNeedingPlacement([]);setReplacementAnchorId('');
     setBoundaries([]);
     setBoundary([]);
     setActiveBoundaryPoints([]);
@@ -1012,19 +1055,22 @@ export default function App() {
   const handleSaveScenario = (name: string, description: string) => {
     const refImg = engineRef.current.getReferenceImage();
     const scenario: ScenarioData = {
-      version: 1,
+      version: 2,
+      coordinate_space: 'normalized-source',
       scenario_name: name,
       description,
       created_at: new Date().toISOString(),
       camera: {
+        source_type:sourceType,device_id:selectedCameraDeviceId||undefined,
+        camera_key:cameraKey||undefined,profile_token:activeOnvifProfile?.token,
         rtsp_url: rtspUrl,
-        resolution: [1280, 720],
+        resolution: [videoElement?.videoWidth || 640, videoElement?.videoHeight || 360],
       },
       features: features.map((f) => ({
         id: f.id,
         type: f.type,
-        x: Math.round(f.x),
-        y: Math.round(f.y),
+        x: f.x,
+        y: f.y,
         label: f.label,
         rotation: f.rotation,
         scale: f.scale,
@@ -1035,11 +1081,11 @@ export default function App() {
       })),
       boundaries: boundaries.map((b) => ({
         ...b,
-        points: b.points.map(([x, y]) => [Math.round(x), Math.round(y)]),
+        points: b.points.map(([x, y]) => [x, y]),
       })),
       boundary: (boundaries[0]?.points || boundary || []).map(([x, y]) => [
-        Math.round(x),
-        Math.round(y),
+        x,
+        y,
       ]),
       boundary_config: boundaries[0]
         ? {
@@ -1051,7 +1097,7 @@ export default function App() {
           }
         : boundaryConfig,
       registration: {
-        method: 'ORB_RANSAC_HOMOGRAPHY',
+        method: 'PTZ_PREDICTION_VISUAL_RESIDUAL_OR_MULTISCALE_LK_RANSAC',
         match_threshold: regSettings.matchRatioThreshold,
         min_inliers: regSettings.minInliers,
       },
@@ -1081,7 +1127,23 @@ export default function App() {
     setScenarioName(name);
   };
 
-  const handleLoadScenario = (scenario: ScenarioData) => {
+  const handleLoadScenario = (loaded: ScenarioData) => {
+    const epoch=++restoreEpochRef.current;
+    const needsRecapture=loaded.coordinate_space!=='normalized-source'&&!loaded.anchor_dimensions;
+    let scenario=loaded;
+    setAnchorsNeedingPlacement(needsRecapture?loaded.features.map(f=>f.id):[]);setReplacementAnchorId('');
+    setSetupActiveViewId(null);setSetupSnapshot(null);setRegistrationSetup(true);
+    if(loaded.coordinate_space!=='normalized-source') {
+      const [w,h]=loaded.anchor_dimensions||[1,1];
+      const normalize=(points:BoundaryPoint[])=>points.map(([x,y])=>[x/w,y/h] as BoundaryPoint);
+      scenario={...loaded,coordinate_space:'normalized-source',
+        features:loaded.features.map(f=>({...f,x:needsRecapture ? .5 : f.x/w,y:needsRecapture ? .5 : f.y/h,
+          anchorViewId:needsRecapture?'needs-recapture':f.anchorViewId})),
+        boundary:needsRecapture?[]:loaded.boundary?normalize(loaded.boundary):undefined,
+        boundaries:loaded.boundaries?.map(b=>({...b,points:needsRecapture?[]:normalize(b.points),anchorViewId:needsRecapture?'needs-recapture':b.anchorViewId}))};
+    }
+    setSetupNotice(needsRecapture?'This older scenario has no placement dimensions. Capture new views and re-place its saved anchors. Redraw its boundaries before using them.':'');
+
     setScenarioName(scenario.scenario_name);
     setFeatures(
       scenario.features.map((f) => ({
@@ -1135,45 +1197,36 @@ export default function App() {
     }
 
     engineRef.current.reset();
-    if (scenario.reference_views?.length) {
-      const referenceViews = scenario.reference_views;
-      setRegistrationSetup(true);
-      setSetupViews(referenceViews);
-      setSetupActiveViewId(null);
-      setSetupSnapshot(null);
-      void (async () => {
-        const restoreCanvas = document.createElement('canvas');
-        restoreCanvas.width = 640;
-        restoreCanvas.height = 360;
-        const ctx = restoreCanvas.getContext('2d', { willReadFrequently: true });
-        if (!ctx) {
-          setRegistrationSetup(false);
-          return;
-        }
-        for (const view of referenceViews) {
-          const image = new Image();
-          const imageLoaded = new Promise<void>((resolve, reject) => {
-            image.onload = () => resolve();
-            image.onerror = () => reject(new Error(`Could not restore camera view ${view.id}`));
-          });
-          image.src = view.image;
-          await imageLoaded;
-          ctx.clearRect(0, 0, 640, 360);
-          ctx.drawImage(image, 0, 0, 640, 360);
-          engineRef.current.addSetupKeyframe(ctx.getImageData(0, 0, 640, 360), view.id, view.image, view.ptzPose);
-        }
-        setRegistrationSetup(false);
-      })().catch((error) => {
-        console.warn('Could not restore saved camera anchor views:', error);
-        setRegistrationSetup(false);
-        setSetupViews([]);
-      });
-    } else {
+    const views=scenario.reference_views?.length?scenario.reference_views:scenario.reference_image?
+      [{id:scenario.features.find(f=>f.anchorViewId)?.anchorViewId||'anchor-view-1',image:scenario.reference_image} as ReferenceView]:[];
+    if(needsRecapture||!views.length){
       setSetupViews([]);
-      setSetupActiveViewId(null);
-      setSetupSnapshot(null);
-      setRegistrationSetup(false);
+      if(!needsRecapture){setAnchorsNeedingPlacement(scenario.features.map(f=>f.id));setFeatures(current=>current.map(f=>({...f,anchorViewId:'needs-recapture'})));setSetupNotice('This scenario has no saved camera views. Capture views and re-place its anchors.');}
+      return;
     }
+    setSetupViews(views);
+    void (async()=>{
+      const canvas=document.createElement('canvas'),ctx=canvas.getContext('2d',{willReadFrequently:true});
+      if(!ctx)throw new Error('Could not create the reference image canvas.');
+      const restored:ReferenceView[]=[];
+      for(const view of views){
+        const image=new Image();
+        await new Promise<void>((resolve,reject)=>{image.onload=()=>resolve();image.onerror=()=>reject(new Error('A saved camera view could not be loaded.'));image.src=view.image;});
+        if(restoreEpochRef.current!==epoch)return;
+        const [w,h]=processingSize(image.naturalWidth,image.naturalHeight,regSettings.processingLongEdge);
+        canvas.width=w;canvas.height=h;ctx.drawImage(image,0,0,w,h);
+        engineRef.current.addSetupKeyframe(ctx.getImageData(0,0,w,h),view.id,view.image,view.ptzPose,view.cameraKey);
+        restored.push({...view,width:w,height:h});
+      }
+      if(restoreEpochRef.current!==epoch)return;
+      setSetupViews(restored);setRegistrationSetup(false);
+    })().catch(error=>{
+      if(restoreEpochRef.current!==epoch)return;
+      engineRef.current.reset();setSetupViews([]);setRegistrationSetup(true);
+      setSetupNotice(`${error instanceof Error?error.message:'Could not restore saved views.'} Capture new anchor views.`);
+      setAnchorsNeedingPlacement(scenario.features.map(f=>f.id));
+      setFeatures(current=>current.map(f=>({...f,anchorViewId:'needs-recapture'})));
+    });
   };
 
   const handleDeleteSavedScenario = (idx: number) => {
@@ -1206,12 +1259,12 @@ export default function App() {
           onToggleCameraFacing={handleToggleCameraFacing}
           availableCameras={availableCameras}
           selectedCameraDeviceId={selectedCameraDeviceId}
-          onSelectCameraDevice={setSelectedCameraDeviceId}
+          onSelectCameraDevice={selectCameraDevice}
           isTorchOn={isTorchOn}
           hasTorchSupport={hasTorchSupport}
           onToggleTorch={handleToggleTorch}
           rtspUrl={rtspUrl}
-          onChangeRtspUrl={setRtspUrl}
+          onChangeRtspUrl={changeRtspUrl}
           isConnected={isConnected}
           onConnect={() => {
             if (sourceType === 'onvif' && !onvifConfig.host.trim()) {
@@ -1287,6 +1340,8 @@ export default function App() {
             setFeatures((prev) => prev.map((f) => (f.id === updated.id ? updated : f)))
           }
           onDeleteFeature={(id) => {
+            setAnchorsNeedingPlacement(current=>current.filter(value=>value!==id));
+            if(replacementAnchorId===id){setReplacementAnchorId('');setPendingFeatureType(null);}
             setFeatures((prev) => prev.filter((f) => f.id !== id));
             setSelectedFeatureId(null);
           }}
@@ -1296,6 +1351,7 @@ export default function App() {
           registrationSetup={registrationSetup}
           setupActiveViewId={setupActiveViewId}
           setupSnapshot={setupSnapshot}
+          activeBoundaryViewId={boundaries.find(b=>b.id===activeDrawingBoundaryId)?.anchorViewId}
         />
 
         {registrationSetup && (
@@ -1305,12 +1361,23 @@ export default function App() {
                 <h2 className="text-sm font-bold uppercase tracking-wider text-sky-300">Visual Anchor Setup</h2>
                 <p className="mt-1 text-xs leading-relaxed text-slate-300">
                   {sourceType === 'rtsp'
-                    ? 'RTSP has no browser-decoded frames connected yet. Add a WebRTC or other browser video relay before capturing setup views.'
+                    ? 'Connect the RTSP feed to capture setup views. The local WebRTC gateway provides browser video.'
                     : 'Capture a view and add its anchors. Press Finish This View to restore live video, move the camera, then capture another view. Registration starts after setup.'}
                 </p>
               </div>
               <span className="shrink-0 rounded bg-slate-800 px-2 py-1 font-mono text-xs text-slate-300">{setupViews.length} VIEWS</span>
             </div>
+            {anchorsNeedingPlacement.length>0&&<div className="mt-3 flex gap-2 text-xs">
+              <select value={replacementAnchorId} onChange={event=>{setReplacementAnchorId(event.target.value);setPendingFeatureType(null);}} className="min-w-0 flex-1 rounded bg-slate-800 p-2">
+                <option value="">Re-place a saved anchor ({anchorsNeedingPlacement.length} remaining)</option>
+                {features.filter(f=>anchorsNeedingPlacement.includes(f.id)).map(f=><option key={f.id} value={f.id}>{f.label}</option>)}
+              </select>
+              <button disabled={!replacementAnchorId||!setupSnapshot} onClick={()=>{
+                const f=features.find(f=>f.id===replacementAnchorId);if(!f)return;
+                setPendingFeatureType(f.type);setPendingFeatureLabel(f.label);setPendingFeatureRotation(f.rotation||0);
+                setPendingFeatureOptions({color:f.color,scale:f.scale,customImage:f.customImage,customImageType:f.customImageType});
+              }} className="rounded bg-amber-800 px-3 disabled:opacity-40">Place anchor</button>
+            </div>}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               {setupSnapshot ? (
                 <button
@@ -1338,12 +1405,13 @@ export default function App() {
               </button>
               <button
                 onClick={finishRegistrationSetup}
-                disabled={Boolean(setupSnapshot) || setupViews.length < 2 || setupViews.some((view) => !features.some((feature) => feature.anchorViewId === view.id))}
+                disabled={anchorsNeedingPlacement.length>0 || Boolean(setupSnapshot) || setupViews.length < 1 || setupViews.some((view) => !features.some((feature) => feature.anchorViewId === view.id))}
                 className="ml-auto rounded border border-indigo-400/60 bg-indigo-500/20 px-3 py-2 text-xs font-semibold text-indigo-100 hover:bg-indigo-500/30 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Finish Setup &amp; Register
               </button>
               <button
+                disabled={anchorsNeedingPlacement.length>0}
                 onClick={() => { setRegistrationSetup(false); setSetupSnapshot(null); }}
                 className="rounded px-2 py-2 text-xs text-slate-400 hover:text-white"
               >
@@ -1357,12 +1425,29 @@ export default function App() {
                   ? 'Live feed restored. Move the camera to another view, then capture it.'
                 : 'Capture the current camera view to begin placing anchors.'}
               {setupActiveViewId && !features.some((feature) => feature.anchorViewId === setupActiveViewId) ? ' Add at least one anchor before capturing the next view.' : ''}
-              {setupViews.length > 0 && setupViews.length < 2 ? ' Capture at least one more distinct view.' : ''}
+              {setupViews.length === 1 ? ' Additional views are optional; capture them to cover more of the scene.' : ''}
             </div>
           </div>
         )}
 
         {/* Shared PTZ controls for the exercise simulator and a real ONVIF camera */}
+        {setupNotice && <div className="absolute top-2 left-2 right-2 z-40 rounded bg-amber-950/95 p-3 text-xs text-amber-100" role="status">{setupNotice}<button onClick={()=>setSetupNotice('')} className="ml-4 underline">Dismiss</button></div>}
+        {sourceType==='onvif' && isVideoReady && <button onClick={()=>setCalibrationOpen(v=>!v)} className="absolute right-3 bottom-3 z-40 rounded border border-sky-500 bg-slate-900 px-3 py-2 text-xs text-sky-200">{calibration?.validated?'PTZ calibration':'Calibrate PTZ anchoring'}</button>}
+        {sourceType==='onvif' && calibrationOpen && activeOnvifProfile && <PtzCalibrationPanel key={`${cameraKey}:${onvifConfig.transport||'webrtc'}`}
+          cameraKey={cameraKey} profile={activeOnvifProfile} calibration={calibration}
+          capture={()=>{const c=cvCanvasRef.current;
+            const time=frameCaptureTimeRef.current-performance.timeOrigin;
+            if(!c||!framePoseRef.current||performance.now()-lastFrameAtRef.current>400||!poseTimelineRef.current.isSettled(time,calibration?.panPeriod??2))return null;
+            return {image:c.toDataURL('image/jpeg',0.9),width:c.width,height:c.height,pose:framePoseRef.current};}}
+          transport={onvifConfig.transport||'webrtc'}
+          onSave={value=>{
+            const config={...onvifConfig,calibration:value},bank={...calibrations,[cameraKey]:value};
+            try{localStorage.setItem('vaas_ptz_calibrations',JSON.stringify(bank));localStorage.setItem('vaas_onvif_camera_config',JSON.stringify(config));}
+            catch{setSetupNotice('The browser could not persist calibration. It will apply for this session.');}
+            setCalibrations(bank);setOnvifConfig(config);setOnvifDraft(config);setCalibrationOpen(false);
+          }}
+          onClose={()=>setCalibrationOpen(false)} />}
+
         {(sourceType === 'simulator' || sourceType === 'onvif') && (
           <ExerciseSimulatorControls
             isOpen={showSimControls}
@@ -1479,19 +1564,19 @@ export default function App() {
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         cameraConfig={cameraConfig}
-        onUpdateCameraConfig={setCameraConfig}
+        onUpdateCameraConfig={updateCameraConfig}
         regSettings={regSettings}
-        onUpdateRegSettings={setRegSettings}
+        onUpdateRegSettings={updateRegSettings}
         overlaySettings={overlaySettings}
         onUpdateOverlaySettings={setOverlaySettings}
         onSetCurrentAsReference={captureAndSetReference}
         sourceType={sourceType}
         onChangeSourceType={handleChangeSourceType}
         cameraFacingMode={cameraFacingMode}
-        onChangeFacingMode={setCameraFacingMode}
+        onChangeFacingMode={changeFacingMode}
         availableCameras={availableCameras}
         selectedCameraDeviceId={selectedCameraDeviceId}
-        onSelectCameraDevice={setSelectedCameraDeviceId}
+        onSelectCameraDevice={selectCameraDevice}
         isTorchOn={isTorchOn}
         hasTorchSupport={hasTorchSupport}
         onToggleTorch={handleToggleTorch}
@@ -1504,12 +1589,20 @@ export default function App() {
         deviceName={onvifDeviceName}
         isBusy={onvifBusy}
         error={onvifError}
-        onChange={setOnvifDraft}
+        onChange={config=>{
+          if(JSON.stringify([config.host,config.port,config.endpointPath,config.username,config.password])!==JSON.stringify([onvifDraft.host,onvifDraft.port,onvifDraft.endpointPath,onvifDraft.username,onvifDraft.password])){
+            setOnvifProfiles([]);setOnvifDeviceName('');config={...config,profileToken:undefined};
+          }
+          setOnvifDraft(config);
+        }}
         onDiscover={handleOnvifDiscover}
         onSaveAndConnect={handleOnvifSaveAndConnect}
         onClose={handleCloseOnvifSetup}
         onForget={() => {
           localStorage.removeItem('vaas_onvif_camera_config');
+          const bank={...calibrations};if(cameraKey)delete bank[cameraKey];
+          setCalibrations(bank);try{localStorage.setItem('vaas_ptz_calibrations',JSON.stringify(bank));}catch{}
+          resetCameraReferences();
           const emptyConfig = { host: '', port: 80, rtspPort: 554, endpointPath: '/onvif/device_service', username: '', password: '' };
           setOnvifConfig(emptyConfig);
           setOnvifDraft(emptyConfig);

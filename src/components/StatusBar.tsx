@@ -47,7 +47,10 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   const { quality, inliers, totalMatches, fps, processingTimeMs } = registrationMetrics;
 
   const getQualityBadge = () => {
-    if (sourceType === 'simulator') {
+    if (registrationMetrics.mode === 'ptz' || registrationMetrics.mode === 'ptz+visual') {
+      return <span className={registrationMetrics.mode === 'ptz+visual' ? 'text-emerald-300' : 'text-amber-300'}>{registrationMetrics.mode === 'ptz+visual' ? 'PTZ + VISUAL CORRECTION' : 'PTZ PREDICTION'} · {Math.round(registrationMetrics.poseAgeMs || 0)}ms</span>;
+    }
+    if (registrationMetrics.mode === 'simulator') {
       return (
         <span className="flex items-center gap-1 text-emerald-400 bg-emerald-950/80 border border-emerald-500/40 px-2 py-0.5 rounded font-mono font-semibold">
           <CheckCircle2 className="w-3 h-3 text-emerald-400" />
@@ -75,7 +78,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
         return (
           <span className="flex items-center gap-1 text-red-400 bg-red-950/90 border border-red-500/50 px-2 py-0.5 rounded font-mono font-semibold animate-pulse">
             <AlertCircle className="w-3 h-3 text-red-400" />
-            <span>REGISTRATION: LOST (OVERLAYS FROZEN)</span>
+            <span>ANCHOR POSITION UNCERTAIN</span>
           </span>
         );
       default:
@@ -152,6 +155,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           <span className="text-[10px] text-slate-500 hidden sm:inline">
             (Matches: {totalMatches})
           </span>
+          {registrationMetrics.trackingHint&&<span className="max-w-sm text-[10px] text-amber-300" role="status">{registrationMetrics.trackingHint}</span>}
         </div>
       </div>
 
@@ -203,9 +207,9 @@ export const StatusBar: React.FC<StatusBarProps> = ({
         <div className="flex items-center gap-1.5 text-slate-400 text-[11px]">
           <Cpu className="w-3 h-3 text-slate-400" />
           <span>FPS:</span>
-          <span className="font-semibold text-slate-200">{fps || 30}</span>
+          <span className="font-semibold text-slate-200">{fps}</span>
           <span className="text-[10px] text-slate-500">
-            ({processingTimeMs.toFixed(1)}ms)
+            ({processingTimeMs.toFixed(1)}ms) {registrationMetrics.frameWidth ? `${registrationMetrics.frameWidth}×${registrationMetrics.frameHeight}` : ''}
           </span>
         </div>
 

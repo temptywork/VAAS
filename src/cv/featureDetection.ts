@@ -1,5 +1,5 @@
 // Fast Corner & Binary Feature (FAST + BRIEF-inspired) Engine in Pure TypeScript
-// High performance, 60 FPS capable, zero external dependencies
+// Resolution-bounded, multiscale oriented binary features; not standard ORB.
 
 export interface Keypoint {
   x: number;
@@ -65,7 +65,7 @@ export function detectFeatures(
   fastThreshold = 22
 ): Keypoint[] {
   const keypoints: Keypoint[] = [];
-  const border = 16;
+  const border = 22;
   const gridW = 16;
   const gridH = 12;
   const cellW = Math.floor((width - 2 * border) / gridW);
@@ -96,7 +96,7 @@ export function detectFeatures(
       if (p8 > p + t) brighterCount++; else if (p8 < p - t) darkerCount++;
       if (p12 > p + t) brighterCount++; else if (p12 < p - t) darkerCount++;
 
-      if (brighterCount < 3 && darkerCount < 3) continue;
+      if (brighterCount < 2 && darkerCount < 2) continue;
 
       // Full 16-point circle test
       let isCorner = false;
@@ -129,17 +129,18 @@ export function detectFeatures(
       }
 
       if (isCorner) {
-        // Compute 128-bit BRIEF descriptor (4 uint32 integers)
+        // Orientation by intensity centroid; rotate the BRIEF sampling pattern.
+        let mx = 0, my = 0;
+        for (let yy = -10; yy <= 10; yy += 2) for (let xx = -10; xx <= 10; xx += 2) {
+          const value = gray[(y + yy) * width + x + xx]; mx += xx * value; my += yy * value;
+        }
+        const angle = Math.atan2(my, mx), cs = Math.cos(angle), sn = Math.sin(angle);
         const descriptor = new Uint32Array(4);
         for (let b = 0; b < 128; b++) {
-          const [dx1, dy1, dx2, dy2] = BRIEF_PAIRS[b];
-          const v1 = gray[(y + dy1) * width + (x + dx1)];
-          const v2 = gray[(y + dy2) * width + (x + dx2)];
-          if (v1 < v2) {
-            const wordIdx = b >> 5; // b / 32
-            const bitIdx = b & 31;  // b % 32
-            descriptor[wordIdx] |= (1 << bitIdx);
-          }
+          const [ax, ay, bx, by] = BRIEF_PAIRS[b];
+          const a = gray[(y + Math.round(ax * sn + ay * cs)) * width + x + Math.round(ax * cs - ay * sn)];
+          const v = gray[(y + Math.round(bx * sn + by * cs)) * width + x + Math.round(bx * cs - by * sn)];
+          if (a < v) descriptor[b >> 5] |= 1 << (b & 31);
         }
 
         const binX = Math.min(gridW - 1, Math.max(0, Math.floor((x - border) / cellW)));
@@ -192,4 +193,26 @@ export function hammingDistance(descA: Uint32Array, descB: Uint32Array): number 
     popcnt32(descA[2] ^ descB[2]) +
     popcnt32(descA[3] ^ descB[3])
   );
+}
+
+export interface GrayLevel { gray: Uint8Array; width: number; height: number }
+export function grayPyramid(gray: Uint8Array, width: number, height: number, levels = 3): GrayLevel[] {
+  const result = [{ gray, width, height }];
+  for (let i = 1; i < levels; i++) {
+    const prev = result[i-1], w = Math.floor(prev.width/2), h = Math.floor(prev.height/2);
+    if (w < 48 || h < 48) break;
+    const next = new Uint8Array(w*h);
+    for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
+      const p=2*y*prev.width+2*x;
+      next[y*w+x]=(prev.gray[p]+prev.gray[p+1]+prev.gray[p+prev.width]+prev.gray[p+prev.width+1])/4;
+    }
+    result.push({ gray:next,width:w,height:h });
+  }
+  return result;
+}
+
+export function detectMultiscale(pyramid: GrayLevel[], maxFeatures=450, threshold=16): Keypoint[] {
+  return pyramid.flatMap((level,i)=>detectFeatures(level.gray,level.width,level.height,
+    Math.floor(maxFeatures*(i===0?0.6:0.4/Math.max(1,pyramid.length-1))),threshold)
+    .map(p=>({...p,x:p.x*2**i,y:p.y*2**i})));
 }
