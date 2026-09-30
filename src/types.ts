@@ -68,6 +68,16 @@ export interface RegistrationMetrics {
   frameWidth?: number;
   frameHeight?: number;
   trackingHint?: string;
+  activeViewId?: string;
+  cameraPose?: CameraPtzPose | null; // Pose aligned to the displayed video frame
+  reportedPose?: CameraPtzPose | null; // Latest raw status response, before video delay alignment
+  videoDelayMs?: number;
+  referencePose?: CameraPtzPose;
+  poseDelta?: { pan: number; tilt: number; zoom: number };
+  angularDeltaDeg?: { pan: number; tilt: number };
+  movementAvailable?: boolean;
+  movementSource?: 'ptz' | 'visual' | 'simulator';
+  visualCorrection?: { translation: [number, number]; scale: number; rotationDeg: number; ageMs: number };
   quality: RegistrationQuality;
   inliers: number;
   totalMatches: number;
@@ -193,11 +203,13 @@ export interface CameraConfig {
 export interface RegistrationSettings {
   processingLongEdge?: number;
   ptzResidualLimitPx?: number;
+  ptzEstimatedResidualLimitPx?: number;
+  ptzCorrectionAlpha?: number;
+  ptzCorrectionDeadbandPx?: number;
+  ptzCorrectionPoseRadiusPx?: number;
   poseMaxAgeMs?: number;
   visualSearchViews?: number;
   descriptorIntervalFrames?: number;
-  residualHoldMs?: number;
-  residualDecayMs?: number;
   transformMaxAgeMs?: number;
   maxAutoKeyframes?: number;
   enabled: boolean;

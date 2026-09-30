@@ -47,7 +47,7 @@ export class VideoGateway {
       const configuration = {
         api: { listen: `127.0.0.1:${port}` },
         rtsp: { listen: '' },
-        webrtc: { listen: '127.0.0.1:8555' },
+        webrtc: { listen: ':8555' },
         streams: { camera: [rtspUrl] },
         log: { level: 'warn' },
       };

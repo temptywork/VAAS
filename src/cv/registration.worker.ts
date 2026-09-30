@@ -6,9 +6,9 @@ let lastReferences=-1;
 const scope=globalThis as unknown as {onmessage:((event:MessageEvent<FrameJob>)=>void)|null;postMessage:(result:FrameResult)=>void};
 scope.onmessage=({data})=>{
   try {
-    if(data.state)engine.restoreReferences(data.state);
     engine.settings=data.settings;
     engine.configurePtz(data.calibration,data.cameraKey);
+    if(data.state)engine.restoreReferences(data.state);
     engine.setFramePose(data.pose,data.poseAge);
     const time=data.time+data.origin-performance.timeOrigin;
     const metrics=engine.processFrame(data.image,time);

@@ -18,7 +18,7 @@ export interface PtzModelOptions {
   opticalZoomMax?: number; tiltOffsetDegrees?: number; wrapPan?: boolean;
 }
 
-/** Nominal geometry uses reported coordinate ranges immediately; visual registration corrects its estimates. */
+/** Nominal geometry uses reported coordinate ranges immediately; visual correction stays bounded. */
 export function createPtzModel(cameraKey:string, profile:OnvifMediaProfile, aspect?:number, options:PtzModelOptions={}):PtzCalibration {
   const range=(value:[number,number]|undefined,fallback:[number,number]):[number,number]=>
     value&&value.every(Number.isFinite)&&value[1]>value[0]?value:fallback;
@@ -35,7 +35,7 @@ export function createPtzModel(cameraKey:string, profile:OnvifMediaProfile, aspe
   return {version:1,modelSource:'estimated',cameraKey,
     panRadiansPerUnit:degrees?Math.PI/180:panSpan*Math.PI/180/(pan[1]-pan[0]),
     tiltRadiansPerUnit:degrees?Math.PI/180:tiltSpan*Math.PI/180/(tilt[1]-tilt[0]),
-    tiltOffsetRadians:degrees?0:tiltOffset*Math.PI/180,
+    tiltOffsetRadians:degrees&&options.tiltOffsetDegrees===undefined?0:tiltOffset*Math.PI/180,
     panPeriod:options.wrapPan===false?0:degrees?360:pan[1]-pan[0],
     principalX:.5,principalY:.5,radialK1:0,
     zoomPoints:[{zoom:zoom[0],focal},{zoom:zoom[1],focal:focal*opticalZoom}],

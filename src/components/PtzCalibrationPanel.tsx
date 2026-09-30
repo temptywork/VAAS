@@ -23,16 +23,18 @@ export function PtzCalibrationPanel({cameraKey,profile,calibration,transport,cap
   const [flipThreshold,setFlipThreshold]=useState(calibration?.autoFlip?.tiltThreshold??0);
   const [flipAbove,setFlipAbove]=useState(calibration?.autoFlip?.above??true);
   const [wrapPan,setWrapPan]=useState(calibration?calibration.panPeriod>0:true);
+  const [panSign,setPanSign]=useState(Math.sign(calibration?.panRadiansPerUnit||1));
+  const [tiltSign,setTiltSign]=useState(Math.sign(calibration?.tiltRadiansPerUnit||1));
+  const [tiltOffset,setTiltOffset]=useState((calibration?.tiltOffsetRadians??PTZ_MODEL_DEFAULTS.tiltOffsetDegrees*Math.PI/180)*180/Math.PI);
   const invalidateGeometry=()=>setFit(null);
   const fitWorker=useRef<Worker|null>(null);
   useEffect(()=>()=>fitWorker.current?.terminate(),[]);
   const seed=():PtzCalibration=>{
     const initial=createPtzModel(cameraKey,profile,snapshot?snapshot.width/snapshot.height:calibration?.aspect,
-      {panSpanDegrees:panSpan,tiltSpanDegrees:tiltSpan,wideFovDegrees:wideFov,opticalZoomMax:maxZoom,wrapPan});
+      {panSpanDegrees:panSpan,tiltSpanDegrees:tiltSpan,wideFovDegrees:wideFov,opticalZoomMax:maxZoom,wrapPan,tiltOffsetDegrees:tiltOffset});
     return {...initial,
-      panRadiansPerUnit:initial.panRadiansPerUnit*(Math.sign(calibration?.panRadiansPerUnit||1)),
-      tiltRadiansPerUnit:initial.tiltRadiansPerUnit*(Math.sign(calibration?.tiltRadiansPerUnit||1)),
-      tiltOffsetRadians:calibration?.tiltOffsetRadians??initial.tiltOffsetRadians,
+      panRadiansPerUnit:initial.panRadiansPerUnit*panSign,
+      tiltRadiansPerUnit:initial.tiltRadiansPerUnit*tiltSign,
       principalX:calibration?.principalX??.5,principalY:calibration?.principalY??.5,radialK1:calibration?.radialK1??0,
       videoDelayMs:transport==='webrtc'?delay:calibration?.videoDelayMs??150,useCaptureTime:captureTime,imageRotationDegrees:rotation,
       autoFlip:flipEnabled?{tiltThreshold:flipThreshold,above:flipAbove}:undefined,
@@ -73,6 +75,9 @@ export function PtzCalibrationPanel({cameraKey,profile,calibration,transport,cap
     <details className="my-2"><summary>Camera values</summary><fieldset disabled={busy}><p className="my-2 text-slate-400">Nominal starting values are already used for PTZ prediction. Adjust them for your camera, or refine them from landmark samples.</p>
       <div className="grid grid-cols-3 gap-2">{[['Pan span °',panSpan,setPanSpan],['Tilt span °',tiltSpan,setTiltSpan],['Wide FOV °',wideFov,setWideFov]].map(([label,value,set])=><label key={String(label)}>{String(label)}<input type="number" min="1" max="360" value={Number(value)} onChange={e=>{invalidateGeometry();(set as (n:number)=>void)(Number(e.target.value));}} className="w-full rounded bg-slate-800 p-1"/></label>)}</div>
       <label className="block my-2">Maximum optical zoom ×<input type="number" min="1" max="100" step="0.1" value={maxZoom} onChange={e=>{invalidateGeometry();setMaxZoom(Math.max(1,Math.min(100,Number(e.target.value))));}} className="ml-2 w-20 rounded bg-slate-800 p-1"/></label>
+      <label className="block my-2">Pitch at reported tilt zero °<input type="number" min="-180" max="180" step=".1" value={tiltOffset} onChange={e=>{invalidateGeometry();setTiltOffset(Math.max(-180,Math.min(180,Number(e.target.value))));}} className="ml-2 w-20 rounded bg-slate-800 p-1"/></label>
+      <label className="my-2 flex gap-2"><input type="checkbox" checked={panSign<0} onChange={e=>{invalidateGeometry();setPanSign(e.target.checked?-1:1);}}/>Reverse reported pan direction</label>
+      <label className="my-2 flex gap-2"><input type="checkbox" checked={tiltSign<0} onChange={e=>{invalidateGeometry();setTiltSign(e.target.checked?-1:1);}}/>Reverse reported tilt direction</label>
       <label className="my-2 flex gap-2"><input type="checkbox" checked={wrapPan} onChange={e=>{invalidateGeometry();setWrapPan(e.target.checked);}}/>Pan covers a full circle and wraps at the reported range endpoints</label>
       <label className="block my-2">Fixed image rotation <select value={rotation} onChange={e=>{invalidateGeometry();setRotation(Number(e.target.value) as PtzCalibration['imageRotationDegrees']);}} className="ml-2 rounded bg-slate-800 p-1">{[0,90,180,270].map(v=><option key={v} value={v}>{v}°</option>)}</select></label>
       <label className="my-2 flex gap-2"><input type="checkbox" checked={flipEnabled} onChange={e=>{invalidateGeometry();setFlipEnabled(e.target.checked);}}/>Camera applies a 180° image flip at a known tilt position</label>

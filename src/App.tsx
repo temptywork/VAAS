@@ -232,12 +232,13 @@ export default function App() {
     candidateKeypointsRef: 0,
     candidateKeypointsCur: 0,
     reprojectionError: 0,
-    homography: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    homography: null,
     fps: 0,
     processingTimeMs: 0,
-    scaleEstimate: 1,
-    rotationEstimateDeg: 0,
-    translationEstimate: [0, 0],
+    scaleEstimate: NaN,
+    rotationEstimateDeg: NaN,
+    translationEstimate: [NaN, NaN],
+    movementAvailable: false,
   });
 
   const [cameraConfig, setCameraConfig] = useState<CameraConfig>({
@@ -738,6 +739,7 @@ export default function App() {
     if (!ctx) return;
 
     if(performance.now()-lastFrameAtRef.current>500)return;
+    if(sourceType==='onvif'&&!framePoseRef.current){setSetupNotice('Wait for camera position data aligned to the video frame before re-referencing.');return;}
     const id=engineRef.current.getCurrentMatchedView().id || engineRef.current.getAnchorViewId();
     const affected=features.filter(f=>(f.anchorViewId||engineRef.current.getAnchorViewId())===id);
     const projected=affected.map(f=>engineRef.current.projectAnchor(id,f.x,f.y));
@@ -821,6 +823,16 @@ export default function App() {
       const sample=sourceType==='onvif'?poseTimelineRef.current.sample(frameTime,cal?.panPeriod??2,regSettings.poseMaxAgeMs??400):null;
       framePoseRef.current=sample?.pose||null;frameCaptureTimeRef.current=performance.timeOrigin+frameTime;lastFrameAtRef.current=now;
       engineRef.current.setFramePose(sample?.pose||null,sample?.ageMs);
+      engineRef.current.updatePtzProjection(w,h,now);
+      const projectionMode=engineRef.current.getProjectionMode();
+      // Pose diagnostics refresh for each decoded frame, including during setup
+      // and while the single CV worker is processing an earlier frame.
+      setRegistrationMetrics(current=>({...current,...engineRef.current.getProjectionMetrics(),
+        reportedPose:sourceType==='onvif'?onvifPoseRef.current:null,
+        videoDelayMs:sourceType==='onvif'?cal?.videoDelayByTransport?.[onvifConfig.transport||'webrtc']??cal?.videoDelayMs:undefined,
+        mode:registrationSetup?'uncertain':projectionMode,
+        quality:registrationSetup?'UNINITIALIZED':projectionMode==='ptz'?'DEGRADED':projectionMode==='ptz+visual'?'GOOD':current.quality,
+      }));
       if(registrationSetup)return;
       if(!setupViews.length){
         const image=canvas.toDataURL('image/jpeg',0.9),id='anchor-view-1';
@@ -832,7 +844,8 @@ export default function App() {
       else engineRef.current.setExternalHomography(null);
       const pixels=ctx.getImageData(0,0,w,h);
       void engineRef.current.processFrameAsync(pixels,now).then(metrics=>{
-        if(!cancelled&&metrics)setRegistrationMetrics(metrics);
+        if(!cancelled&&metrics)setRegistrationMetrics(current=>({...current,...metrics,
+          reportedPose:sourceType==='onvif'?onvifPoseRef.current:null}));
       }).catch(error=>{if(!cancelled)setSetupNotice(error instanceof Error?error.message:'Visual registration could not process this frame.');});
     };
     const callback=(now:number,metadata:VideoFrameCallbackMetadata)=>{processFrame(now,metadata);if(!cancelled)callbackId=video!.requestVideoFrameCallback(callback);};
@@ -847,7 +860,7 @@ export default function App() {
     if(!isConnected||sourceType==='simulator')return;
     const timer=setInterval(()=>{if(lastFrameAtRef.current&&performance.now()-lastFrameAtRef.current>1000){
       framePoseRef.current=null;engineRef.current.setFramePose(null);
-      setRegistrationMetrics(m=>({...m,quality:'LOST',mode:'uncertain',fps:0}));
+      setRegistrationMetrics(m=>({...m,...engineRef.current.getProjectionMetrics(),quality:'LOST',mode:'uncertain',fps:0}));
       if(['onvif','rtsp'].includes(sourceType)&&!document.hidden&&performance.now()-lastFrameAtRef.current>5000){
         lastFrameAtRef.current=0;setConnectionRevision(v=>v+1);
       }

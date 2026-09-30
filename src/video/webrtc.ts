@@ -41,7 +41,7 @@ export async function connectWebRtc(video:HTMLVideoElement,sessionId:string,sign
       body:JSON.stringify({sessionId,sdp:pc.localDescription?.sdp}),signal:AbortSignal.any([signal,AbortSignal.timeout(20000)])});
     const data=await response.json();if(!response.ok)throw new Error(data.error||'WebRTC negotiation failed.');
     signal.throwIfAborted();await pc.setRemoteDescription({type:'answer',sdp:data.sdp});
-    firstFrame=setTimeout(()=>{if(video.readyState<2)fail('No video frames arrived. Check the H.264 camera profile, RTSP access, and gateway media port.');},12000);
+    firstFrame=setTimeout(()=>{if(video.readyState<2)fail('No video frames arrived. Check the H.264 camera profile, RTSP access, and gateway media port.');},20000);
     video.addEventListener('loadeddata',loaded,{once:true});if(video.readyState>=2)loaded();
     return pc;
   }catch(error){abort();signal.removeEventListener('abort',abort);throw error;}

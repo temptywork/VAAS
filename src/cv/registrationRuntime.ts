@@ -44,8 +44,12 @@ export class RegistrationRuntime extends VisualRegistrationEngine {
       if(data.state&&data.metrics){
         this.acceptProcessedState(data.state);
         const mode=this.getProjectionMode();
-        const quality=mode==='uncertain'?(this.getHomography()?'DEGRADED':'LOST'):mode==='ptz'?'DEGRADED':data.metrics.quality;
-        pending.resolve({...data.metrics,mode,quality,ptzModel:this.getPtzModel(),homography:this.getHomography(),trackingHint:this.getTrackingHint(),poseAgeMs:Number.isFinite(this.frameAge)?this.frameAge:undefined});
+        const quality=mode==='uncertain'?'LOST':mode==='ptz'?'DEGRADED':data.metrics.quality;
+        const sameView=data.metrics.activeViewId===this.getCurrentMatchedView().id;
+        pending.resolve({...data.metrics,...this.getProjectionMetrics(),mode,quality,
+          inliers:sameView?this.getInliers().length:0,totalMatches:sameView?this.getMatches().length:0,
+          reprojectionError:sameView?data.metrics.reprojectionError:0,
+          candidateKeypointsRef:this.getReferenceKeypoints().length});
       }else pending.resolve(null);
     };
     worker.onerror=()=>{

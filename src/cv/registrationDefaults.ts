@@ -7,8 +7,10 @@ export const REGISTRATION_DEFAULTS: RegistrationSettings = {
   adaptiveReference: true, updateIntervalMs: 33, processingLongEdge: 960,
   // Pixel thresholds are defined at a 960-pixel long edge and scaled at runtime.
   ptzResidualLimitPx: 24, poseMaxAgeMs: 400,
+  ptzEstimatedResidualLimitPx: 48, ptzCorrectionAlpha: 0.2,
+  ptzCorrectionDeadbandPx: 0.75, ptzCorrectionPoseRadiusPx: 96,
   visualSearchViews: 3, descriptorIntervalFrames: 5,
-  residualHoldMs: 250, residualDecayMs: 750, transformMaxAgeMs: 500,
+  transformMaxAgeMs: 500,
   maxAutoKeyframes: 8,
 };
 
@@ -24,10 +26,13 @@ export function registrationSettings(value: Partial<RegistrationSettings> = {}):
     updateIntervalMs: limit(s.updateIntervalMs,33,16,250), processingLongEdge: limit(s.processingLongEdge,960,320,1280),
     smoothingFactor: limit(s.smoothingFactor,.65,.1,1), poseMaxAgeMs: limit(s.poseMaxAgeMs,400,100,2000),
     ptzResidualLimitPx: limit(s.ptzResidualLimitPx,24,2,80),
+    ptzEstimatedResidualLimitPx: limit(s.ptzEstimatedResidualLimitPx,48,2,80),
+    ptzCorrectionAlpha: limit(s.ptzCorrectionAlpha,.2,.05,1),
+    ptzCorrectionDeadbandPx: limit(s.ptzCorrectionDeadbandPx,.75,0,3),
+    ptzCorrectionPoseRadiusPx: limit(s.ptzCorrectionPoseRadiusPx,96,24,240),
     visualSearchViews: Math.round(limit(s.visualSearchViews,3,1,8)),
     descriptorIntervalFrames: Math.round(limit(s.descriptorIntervalFrames,5,1,30)),
     lostFrameToleranceFrames: Math.round(limit(s.lostFrameToleranceFrames,8,0,30)),
-    residualHoldMs: limit(s.residualHoldMs,250,0,1000), residualDecayMs: limit(s.residualDecayMs,750,100,3000),
     transformMaxAgeMs: limit(s.transformMaxAgeMs,500,100,2000),
     maxAutoKeyframes: Math.round(limit(s.maxAutoKeyframes,8,0,24)) };
 }

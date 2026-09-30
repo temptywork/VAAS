@@ -334,7 +334,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div>
                   <div className="flex justify-between text-[11px] font-mono mb-1">
                     <span className="text-slate-400">Temporal Smoothing Responsiveness (α)</span>
-                    <span className="text-emerald-400 font-bold">{((regSettings.smoothingFactor ?? REGISTRATION_DEFAULTS.smoothingFactor) * 100).toFixed(0)}%</span>
+                    <span className="text-emerald-400 font-bold">{((regSettings.smoothingFactor ?? REGISTRATION_DEFAULTS.smoothingFactor ?? .65) * 100).toFixed(0)}%</span>
                   </div>
                   <input
                     type="range"
@@ -380,17 +380,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
               <details className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-xs">
                 <summary className="cursor-pointer text-sky-300">Shared processing and PTZ settings</summary>
-                <p className="my-2 text-slate-400">Applied to every input feed. Pixel thresholds scale from a 960-pixel image long edge. PTZ settings apply when camera telemetry and calibration are available.</p>
+                <p className="my-2 text-slate-400">Applied to every input feed. Pixel thresholds scale from a 960-pixel image long edge. Fresh PTZ telemetry drives camera projection with estimated or fitted optics; calibration is optional. Visual corrections stay bounded and remain stable at the same pose.</p>
                 <div className="grid grid-cols-2 gap-3">
                   {([
                     {key:'processingLongEdge',label:'Processing long edge (px)',min:320,max:1280,step:80},
                     {key:'updateIntervalMs',label:'Frame interval (ms)',min:16,max:250,step:1},
                     {key:'poseMaxAgeMs',label:'Maximum pose age (ms)',min:100,max:2000,step:50},
                     {key:'ptzResidualLimitPx',label:'Visual correction limit (px)',min:2,max:80,step:1},
+                    {key:'ptzEstimatedResidualLimitPx',label:'Estimated optics correction limit (px)',min:2,max:80,step:1},
+                    {key:'ptzCorrectionAlpha',label:'PTZ correction smoothing',min:.05,max:1,step:.05},
+                    {key:'ptzCorrectionDeadbandPx',label:'PTZ correction deadband (px)',min:0,max:3,step:.25},
+                    {key:'ptzCorrectionPoseRadiusPx',label:'Correction pose range (px)',min:24,max:240,step:8},
                     {key:'visualSearchViews',label:'Views searched per frame',min:1,max:8,step:1},
                     {key:'descriptorIntervalFrames',label:'Descriptor refresh (frames)',min:1,max:30,step:1},
-                    {key:'residualHoldMs',label:'Correction hold (ms)',min:0,max:1000,step:50},
-                    {key:'residualDecayMs',label:'Correction fade (ms)',min:100,max:3000,step:50},
                     {key:'transformMaxAgeMs',label:'Stale transform limit (ms)',min:100,max:2000,step:50},
                     {key:'maxAutoKeyframes',label:'Automatic reference limit',min:0,max:24,step:1},
                   ] as const).map(field=><label key={field.key} className="text-slate-400">{field.label}
