@@ -45,7 +45,7 @@ export class RegistrationRuntime extends VisualRegistrationEngine {
         this.acceptProcessedState(data.state);
         const mode=this.getProjectionMode();
         const quality=mode==='uncertain'?(this.getHomography()?'DEGRADED':'LOST'):mode==='ptz'?'DEGRADED':data.metrics.quality;
-        pending.resolve({...data.metrics,mode,quality,homography:this.getHomography(),trackingHint:this.getTrackingHint(),poseAgeMs:Number.isFinite(this.frameAge)?this.frameAge:undefined});
+        pending.resolve({...data.metrics,mode,quality,ptzModel:this.getPtzModel(),homography:this.getHomography(),trackingHint:this.getTrackingHint(),poseAgeMs:Number.isFinite(this.frameAge)?this.frameAge:undefined});
       }else pending.resolve(null);
     };
     worker.onerror=()=>{

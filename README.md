@@ -41,15 +41,17 @@ HLS remains an explicit compatibility fallback. It requires FFmpeg and adds buff
 
 ### PTZ calibration and frame timing
 
-The **Calibrate PTZ anchoring** panel is operated by the user. Collect stopped-camera observations of two fixed, distant landmarks across horizontal movement, vertical movement and two to eight repeatable optical zoom positions. Fit the model, perform the panel's independent landmark checks, then save it. Measurements estimate camera direction conventions, tilt offset, image principal point, radial distortion and focal length at measured zoom positions. Full-circle pan constrains the mechanical pan period; zoom outside the measured range uses visual registration until additional calibration is available.
+ONVIF PTZ telemetry is used immediately, without calibration, together with visual registration. The app builds nominal camera geometry from reported PTZ coordinate ranges, decoded image aspect ratio and adjustable starting optics. Fresh camera pose drives projection and ranks saved views; broad visual matching corrects errors in the estimated geometry. The status badge identifies an estimated model. Missing or stale telemetry uses visual registration.
 
-CP Plus datasheet values are starting values, not a camera-specific calibration. Change starting values for other cameras. Calibration is saved per camera and media profile in this browser. Recalibrate after changes to cropping, digital image geometry or camera mechanics. Same-aspect resolution changes retain normalized anchor geometry; aspect changes require new reference views.
+The optional **Improve PTZ accuracy** panel starts with four stopped-camera observations of one fixed, distant landmark, or two observations each of two landmarks. Move slightly between captures; a single zoom position is sufficient. Fit and save immediately, without extra verification captures or a required camera-settings checkbox. A quick fit refines observable movement and focal length while keeping poorly constrained lens parameters fixed. Additional varied observations allow the existing fitter to refine tilt offset, principal point and radial distortion. Fit error up to 15 pixels at a 960-pixel image width is accepted; full fits with error at most 6 pixels use tighter visual corrections in their measured zoom range. Unmeasured zoom retains a nominal curve with broad visual correction.
+
+CP Plus datasheet values are nominal starting values, not a camera-specific calibration. Change camera values for other models; camera values and timing can be applied without collecting any samples. Calibration is saved per camera and media profile in this browser. Recalibrate after changes to cropping, digital image geometry or camera mechanics. Same-aspect resolution changes retain normalized anchor geometry; aspect changes require new reference views.
 
 Image stabilization and digital zoom must remain disabled because their changing image warp is not represented by ONVIF pan/tilt/zoom. A fixed image rotation and a known tilt-dependent 180-degree flip rule can be configured in calibration. Unknown automatic flip behavior must be disabled or avoided.
 
 Frame-to-pose matching uses decoded-frame callbacks and a timestamped pose history. **150 ms for WebRTC and 2000 ms for HLS are initial timing estimates**, not measured latency. Set the video delay for the selected transport while viewing actual movement. Separate timing offsets are saved for WebRTC and HLS. Camera status timestamps use a browser-clock offset when they are sufficiently precise; request midpoints remain the fallback. Browser WebRTC capture timestamps must only be enabled after the user confirms that they align with camera exposure time through the gateway; RTP timestamp preservation alone does not establish that alignment.
 
-With a saved calibration and fresh pose, camera geometry drives projection for every saved view. Visual matching searches within the PTZ prediction and adds only a bounded similarity correction. Weak visual support briefly retains that correction, then fades it toward the camera prediction. Stale poses use visual registration; stale visual transforms expire instead of showing indefinitely misplaced overlays. A single camera-rotation model assumes distant landmarks or limited parallax; nearby objects at different depths cannot be made exact by a global image warp.
+Fresh pose drives projection for every saved view with a captured camera position. Nominal and quick-fit models permit a full visual homography correction so uncertain optics cannot reject otherwise valid matches. Complete, accurate fits constrain matching around the PTZ prediction and add a bounded similarity correction. Weak visual support briefly retains the correction, then fades it toward the camera prediction. Stale poses use visual registration; stale visual transforms expire instead of showing indefinitely misplaced overlays. A single camera-rotation model assumes distant landmarks or limited parallax; nearby objects at different depths cannot be made exact by a global image warp.
 
 ### Anchor setup and saved scenarios
 
@@ -61,16 +63,12 @@ New scenario files use normalized source-image coordinates and include native re
 
 Registration settings are shared across feed types and saved locally. The Settings panel exposes processing resolution, frame interval, feature and RANSAC limits, pose freshness, visual correction limits, correction hold/fade, view-search budget and automatic-reference limits. Pixel thresholds are expressed at a 960-pixel long edge and scaled to the actual processing image. Background CV accepts one in-flight frame, with no accumulating queue; PTZ projection continues for each sampled frame while CV is busy.
 
-### Local and LAN gateway configuration
+### Local gateway configuration
 
-For same-computer use, the gateway API and media listener default to loopback. To view VAAS from another LAN device, set the media listener to all interfaces and advertise the development computer's LAN address:
+Each camera session generates its gateway configuration using the selected RTSP URL. The management API prefers `127.0.0.1:58080`; if that port cannot be allocated, it uses an available local port. The server uses the selected API port for readiness and SDP requests. WebRTC media is fixed at `127.0.0.1:8555`, and the RTSP server listener is disabled. The generated WebRTC configuration contains only `listen`; ICE servers and candidates use go2rtc defaults.
 
-```dotenv
-GO2RTC_WEBRTC_HOST=0.0.0.0
-GO2RTC_WEBRTC_PORT=8555
-GO2RTC_CANDIDATE=192.168.1.20:8555
-```
+Gateway configurations are saved and loaded from `.tools/go2rtc-<session>/go2rtc.yaml`. HLS playlists and segments use `.tools/onvif-<session>/`, and installer downloads and extraction use `.tools/install-go2rtc-<session>/`. These files use the project's `.tools` directory rather than the operating system's temporary directory. Session cleanup removes its own directory, preserving the gateway executable and other sessions; installer staging is removed when installation finishes.
 
-Allow that TCP/UDP media port through the development computer's firewall. Use local HTTPS with a certificate trusted by the viewing device. The go2rtc management API remains loopback-only; the browser negotiates through the same-origin Vite API. Candidate syntax and media ports follow the [go2rtc WebRTC documentation](https://github.com/AlexxIT/go2rtc/tree/v1.9.14#module-webrtc).
+Run the browser on the same computer as the gateway for this loopback media configuration. The browser negotiates through the same-origin Vite API. `GO2RTC_PATH` can select another gateway executable; media host, port and candidate environment overrides are not used.
 
 Camera configuration and calibration live in browser local storage. Camera credentials are passed to the local server and written to a private per-session gateway configuration, removed when the session closes. Only one network-camera session is active per Vite server; reconnecting replaces its session ID so stale clients cannot stop its replacement.

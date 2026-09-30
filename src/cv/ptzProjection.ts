@@ -1,4 +1,4 @@
-import type { CameraPtzPose, PtzCalibration } from '../types';
+import type { CameraPtzPose, OnvifMediaProfile, PtzCalibration } from '../types';
 import { invertHomography, type Homography } from './homography';
 
 export const IDENTITY = [1, 0, 0, 0, 1, 0, 0, 0, 1];
@@ -8,6 +8,40 @@ export function multiply(a: number[], b: number[]): number[] {
 }
 const transpose = (m: number[]) => [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];
 const vector = (m: number[], v: number[]) => [0, 1, 2].map(i => m[3*i]*v[0] + m[3*i+1]*v[1] + m[3*i+2]*v[2]);
+
+export const PTZ_MODEL_DEFAULTS = {
+  panSpanDegrees: 360, tiltSpanDegrees: 105, wideFovDegrees: 62.8,
+  opticalZoomMax: 25, tiltOffsetDegrees: 37.5,
+};
+export interface PtzModelOptions {
+  panSpanDegrees?: number; tiltSpanDegrees?: number; wideFovDegrees?: number;
+  opticalZoomMax?: number; tiltOffsetDegrees?: number; wrapPan?: boolean;
+}
+
+/** Nominal geometry uses reported coordinate ranges immediately; visual registration corrects its estimates. */
+export function createPtzModel(cameraKey:string, profile:OnvifMediaProfile, aspect?:number, options:PtzModelOptions={}):PtzCalibration {
+  const range=(value:[number,number]|undefined,fallback:[number,number]):[number,number]=>
+    value&&value.every(Number.isFinite)&&value[1]>value[0]?value:fallback;
+  const pan=range(profile.ptz?.panRange,[-1,1]),tilt=range(profile.ptz?.tiltRange,[-1,1]),zoom=range(profile.ptz?.zoomRange,[0,1]);
+  const degrees=!!profile.ptz?.panTiltSpace?.includes('SphericalPositionSpace');
+  const value=(n:number|undefined,fallback:number,min:number,max:number)=>Math.max(min,Math.min(max,Number.isFinite(n)?n!:fallback));
+  const panSpan=value(options.panSpanDegrees,PTZ_MODEL_DEFAULTS.panSpanDegrees,1,360);
+  const tiltSpan=value(options.tiltSpanDegrees,PTZ_MODEL_DEFAULTS.tiltSpanDegrees,1,360);
+  const tiltOffset=value(options.tiltOffsetDegrees,PTZ_MODEL_DEFAULTS.tiltOffsetDegrees,-180,180);
+  const opticalZoom=value(options.opticalZoomMax,PTZ_MODEL_DEFAULTS.opticalZoomMax,1,100);
+  const fov=value(options.wideFovDegrees,PTZ_MODEL_DEFAULTS.wideFovDegrees,5,170);
+  const focal=1/(2*Math.tan(fov*Math.PI/360));
+  const imageAspect=aspect&&Number.isFinite(aspect)&&aspect>0?aspect:profile.width>0&&profile.height>0?profile.width/profile.height:16/9;
+  return {version:1,modelSource:'estimated',cameraKey,
+    panRadiansPerUnit:degrees?Math.PI/180:panSpan*Math.PI/180/(pan[1]-pan[0]),
+    tiltRadiansPerUnit:degrees?Math.PI/180:tiltSpan*Math.PI/180/(tilt[1]-tilt[0]),
+    tiltOffsetRadians:degrees?0:tiltOffset*Math.PI/180,
+    panPeriod:options.wrapPan===false?0:degrees?360:pan[1]-pan[0],
+    principalX:.5,principalY:.5,radialK1:0,
+    zoomPoints:[{zoom:zoom[0],focal},{zoom:zoom[1],focal:focal*opticalZoom}],
+    aspect:imageAspect,validated:false,rmsErrorPx:0,videoDelayMs:150,useCaptureTime:false,
+    videoDelayByTransport:{webrtc:150,hls:2000},updatedAt:new Date().toISOString()};
+}
 
 /** Camera-to-world rotation. Image y points down; positive pitch points the camera up. */
 export function cameraRotation(p: CameraPtzPose, c: PtzCalibration): number[] {
@@ -83,23 +117,40 @@ export interface CalibrationObservation { landmark: string; x: number; y: number
 export function fitCalibration(observations: CalibrationObservation[], initial: PtzCalibration): PtzCalibration {
   const groups = new Map<string, CalibrationObservation[]>();
   for (const o of observations) groups.set(o.landmark,[...(groups.get(o.landmark)||[]),o]);
-  if (observations.length < 12 || groups.size < 2 || [...groups.values()].some(g=>g.length<4)) {
-    throw new Error('Capture at least 12 samples, using two fixed landmarks with at least four samples each.');
+  for(const [id,group] of groups)if(group.length<2)groups.delete(id);
+  const usable=[...groups.values()].flat();
+  if (usable.length < 4) {
+    throw new Error('Capture four samples of a fixed landmark, or two samples each of two landmarks.');
   }
-  const zooms = [...new Set(observations.map(o=>Math.round(o.pose.zoom*10000)/10000))].sort((a,b)=>a-b);
-  if (zooms.length < 2 || zooms.length > 8) throw new Error('Use two to eight repeatable zoom positions, with several samples at each.');
-  if (Math.max(...observations.map(o=>o.x))-Math.min(...observations.map(o=>o.x)) < 0.25 ||
-      Math.max(...observations.map(o=>o.y))-Math.min(...observations.map(o=>o.y)) < 0.2) {
-    throw new Error('Move the landmarks across more of the image horizontally and vertically before fitting.');
+  if(usable.some(o=>![o.x,o.y,o.width,o.height,o.pose.pan,o.pose.tilt,o.pose.zoom].every(Number.isFinite)||o.width<=0||o.height<=0)) {
+    throw new Error('Capture a fresh image with finite camera position values.');
   }
-  const aspect=observations[0].width/observations[0].height;
-  if (observations.some(o=>Math.abs(o.width/o.height-aspect)>0.01)) throw new Error('Keep the same stream profile during calibration.');
+  const span=(values:number[])=>Math.max(...values)-Math.min(...values);
+  const moved=[...groups.values()].some(g=>
+    (span(g.map(o=>o.x))>.03||span(g.map(o=>o.y))>.03)&&
+    [span(g.map(o=>o.pose.pan)),span(g.map(o=>o.pose.tilt)),span(g.map(o=>o.pose.zoom))].some(v=>v>.0001));
+  if(!moved)throw new Error('Move the camera slightly between captures so a fixed landmark changes image position.');
+  const zooms = [...new Set(usable.map(o=>Math.round(o.pose.zoom*10000)/10000))].sort((a,b)=>a-b);
+  if (zooms.length > 8) throw new Error('Use at most eight zoom positions in one fit. A single zoom position is enough to start.');
+  const aspect=usable[0].width/usable[0].height;
+  if (usable.some(o=>Math.abs(o.width/o.height-aspect)>0.01)) throw new Error('Keep the same stream profile during calibration.');
+  const full=usable.length>=12&&groups.size>=2&&span(usable.map(o=>o.x))>.25&&span(usable.map(o=>o.y))>.2;
+  const panVaries=span(usable.map(o=>o.pose.pan))>.0001,tiltVaries=span(usable.map(o=>o.pose.tilt))>.0001;
   const p=[initial.panRadiansPerUnit,initial.tiltRadiansPerUnit,initial.tiltOffsetRadians,
     ...zooms.map(z=>Math.log(focalAt(z, initial) || initial.zoomPoints[0]?.focal || 0.82)), initial.radialK1 || 0, initial.principalX, initial.principalY];
   if(initial.panPeriod>0)p[0]=Math.sign(p[0])*2*Math.PI/initial.panPeriod;
   const basePan=Math.abs(p[0]), baseTilt=Math.abs(p[1]);
-  const decode=(v:number[]):PtzCalibration=>({...initial,panRadiansPerUnit:v[0],tiltRadiansPerUnit:v[1],tiltOffsetRadians:v[2],
-    radialK1:v[v.length-3],principalX:v[v.length-2],principalY:v[v.length-1],aspect,zoomPoints:zooms.map((z,i)=>({zoom:z,focal:Math.exp(v[3+i])}))});
+  const decode=(v:number[]):PtzCalibration=>{
+    const fitted=zooms.map((z,i)=>({zoom:z,focal:Math.exp(v[3+i])}));
+    // Unmeasured zoom retains the nominal curve, adjusted to join the measured focal values continuously.
+    const outside=initial.zoomPoints.filter(p=>p.zoom<zooms[0]||p.zoom>zooms.at(-1)!).map(p=>{
+      const nearest=p.zoom<zooms[0]?fitted[0]:fitted.at(-1)!;
+      return {zoom:p.zoom,focal:p.focal*nearest.focal/(focalAt(nearest.zoom,initial)||nearest.focal)};
+    });
+    return {...initial,panRadiansPerUnit:v[0],tiltRadiansPerUnit:v[1],tiltOffsetRadians:v[2],
+      radialK1:v[v.length-3],principalX:v[v.length-2],principalY:v[v.length-1],aspect,
+      zoomPoints:[...outside,...fitted].sort((a,b)=>a.zoom-b.zoom)};
+  };
   const loss=(v:number[])=>{
     if (Math.abs(v[0])<basePan*0.7 || Math.abs(v[0])>basePan*1.3 || Math.abs(v[1])<baseTilt*0.7 || Math.abs(v[1])>baseTilt*1.3 || Math.abs(v[2])>Math.PI || Math.abs(v[v.length-3])>0.4 || v.slice(-2).some(n=>n<.35||n>.65)) return 1e12;
     if (v.slice(3,-3).some(f=>f<Math.log(0.3)||f>Math.log(50))) return 1e12;
@@ -119,13 +170,16 @@ export function fitCalibration(observations: CalibrationObservation[], initial: 
   };
   let best=p, bestLoss=Infinity;
   // Direction conventions vary between cameras. Fit both signs against actual image observations.
-  for (const panSign of [1,-1]) for (const tiltSign of [1,-1]) {
+  for (const panSign of (panVaries?[1,-1]:[1])) for (const tiltSign of (tiltVaries?[1,-1]:[1])) {
     const v=[...p]; v[0]*=panSign; v[1]*=tiltSign;
-    const steps=[initial.panPeriod>0?0:basePan*0.08,baseTilt*0.08,0.1,...zooms.map(()=>0.2),0.03,0.02,0.02];
+    // A quick fit adjusts observable movement and focal length; richer samples also fit lens geometry.
+    const steps=[initial.panPeriod>0||!panVaries?0:basePan*0.08,tiltVaries?baseTilt*0.08:0,full?0.1:0,
+      ...zooms.map(()=>0.2),full?0.03:0,full?0.02:0,full?0.02:0];
     let score=loss(v);
     for (let iteration=0;iteration<180;iteration++) {
       let improved=false;
       for (let i=0;i<v.length;i++) {
+        if(steps[i]===0)continue;
         const old=v[i]; let selected=old;
         for (const sign of [-1,1]) {v[i]=old+steps[i]*sign; const next=loss(v); if(next<score){score=next;selected=v[i];improved=true;}}
         v[i]=selected;
@@ -136,8 +190,9 @@ export function fitCalibration(observations: CalibrationObservation[], initial: 
     if(score<bestLoss){best=v;bestLoss=score;}
   }
   const c=decode(best), rms=Math.sqrt(bestLoss);
-  if(!Number.isFinite(rms)||rms>5) throw new Error(`Calibration error is ${rms.toFixed(1)} px at 960px width. Check landmark identity, pause the camera, and collect more samples.`);
-  // Generic zoom must increase focal length. Do not extrapolate outside measured zoom positions.
+  if(!Number.isFinite(rms)||rms>15) throw new Error(`Fit error is ${rms.toFixed(1)} px at 960px width. Repeat the same landmark at a few stopped camera positions.`);
+  // Generic zoom must increase focal length, including the nominal extension outside measured positions.
   if(c.zoomPoints.some((p,i)=>i>0&&p.focal<c.zoomPoints[i-1].focal*0.95)) throw new Error('Zoom samples are inconsistent. Repeat at stable, increasing optical zoom positions.');
-  return {...c,validated:true,rmsErrorPx:rms,panPeriod:initial.panPeriod,updatedAt:new Date().toISOString()};
+  return {...c,modelSource:'fitted',refinement:full?'full':'basic',sampleCount:usable.length,
+    measuredZoomRange:[zooms[0],zooms.at(-1)!],validated:true,rmsErrorPx:rms,panPeriod:initial.panPeriod,updatedAt:new Date().toISOString()};
 }

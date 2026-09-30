@@ -99,27 +99,44 @@ export class VisualRegistrationEngine {
   }
   setExternalViews(views: Map<string,Homography>) { this.external=views; }
   hasExternalGeometry(){return this.external.size>0;}
+  getPtzModel():RegistrationMetrics['ptzModel'] {
+    return this.calibration ? this.calibration.modelSource || (this.calibration.validated?'fitted':'estimated') : undefined;
+  }
   getTrackingHint():string|undefined {
     if(!this.cameraKey)return undefined;
-    if(!this.calibration?.validated)return 'Calibrate PTZ to enable positioning from camera telemetry';
     if(!this.pose||this.poseAge>(this.settings.poseMaxAgeMs??400))return 'Camera position data is stale; using visual registration';
+    if(!this.calibration)return 'Waiting for camera profile geometry; using visual registration';
     if(Math.abs(this.width/this.height-this.calibration.aspect)>.02)return 'Image geometry changed; update PTZ calibration';
-    if(!focalAt(this.pose.zoom,this.calibration))return 'Zoom is outside the calibrated range; using visual registration';
+    if(!focalAt(this.pose.zoom,this.calibration))return 'Zoom is outside the camera model range; using visual registration';
+    if(this.getPtzModel()==='estimated')return 'PTZ telemetry and visual registration are active. Optional calibration improves the estimated camera geometry.';
+    const range=this.calibration.measuredZoomRange;
+    if(range&&(this.pose.zoom<range[0]-.001||this.pose.zoom>range[1]+.001))return 'PTZ and visual registration are active; zoom geometry outside measured positions is estimated.';
     return undefined;
   }
   private canPredict(k:Keyframe): boolean {
     const c=this.calibration;
-    return !!(c?.validated && c.cameraKey===this.cameraKey && k.cameraKey===this.cameraKey && k.ptzPose && this.pose &&
+    return !!(c && c.cameraKey===this.cameraKey && k.cameraKey===this.cameraKey && k.ptzPose && this.pose &&
+      [c.panRadiansPerUnit,c.tiltRadiansPerUnit,c.tiltOffsetRadians,c.principalX,c.principalY,c.radialK1].every(Number.isFinite) &&
+      [k.ptzPose.pan,k.ptzPose.tilt,k.ptzPose.zoom,this.pose.pan,this.pose.tilt,this.pose.zoom].every(Number.isFinite) &&
+      focalAt(k.ptzPose.zoom,c) && focalAt(this.pose.zoom,c) &&
       this.poseAge <= (this.settings.poseMaxAgeMs ?? 400) &&
       (!k.ptzPose.panTiltSpace || !this.pose.panTiltSpace || k.ptzPose.panTiltSpace===this.pose.panTiltSpace) &&
       (!k.ptzPose.zoomSpace || !this.pose.zoomSpace || k.ptzPose.zoomSpace===this.pose.zoomSpace) && Math.abs(this.width/this.height-c.aspect)<0.02 && Math.abs(k.width/k.height-c.aspect)<0.02);
+  }
+  /** A complete fit can constrain visual matches; nominal and quick models retain broad visual recovery. */
+  private precisePrediction(k:Keyframe):boolean {
+    const c=this.calibration;
+    if(!c?.validated||c.modelSource==='estimated'||!this.canPredict(k))return false;
+    if(c.refinement==='basic'||c.rmsErrorPx>6)return false;
+    const range=c.measuredZoomRange;
+    return !range||[this.pose!.zoom,k.ptzPose!.zoom].every(z=>z>=range[0]-.001&&z<=range[1]+.001);
   }
   projectAnchor(id: string | undefined, x:number,y:number):[number,number]|null {
     const viewId=id||this.getAnchorViewId(), k=this.keyframes.find(k=>k.id===viewId);
     if(!k) return null;
     const h=this.getViewHomography(viewId); if(!h) return null;
     const t=this.transforms.get(viewId);
-    if(this.settings.enabled && !this.external.has(viewId) && t?.mode.startsWith('ptz') && this.canPredict(k)) {
+    if(this.settings.enabled && !this.external.has(viewId) && t?.mode.startsWith('ptz') && this.precisePrediction(k)) {
       const p=projectPtz(x,y,k.ptzPose!,this.pose!,this.calibration!,k.width/k.height,this.width/this.height);
       if(!p) return null;
       const q=projectPoint(t.residual||IDENTITY,p[0]*this.width,p[1]*this.height);
@@ -133,7 +150,7 @@ export class VisualRegistrationEngine {
   unprojectAnchor(id:string,x:number,y:number):[number,number]|null {
     const k=this.keyframes.find(k=>k.id===id),t=this.transforms.get(id),h=this.getViewHomography(id);
     if(!k||!h) return null;
-    if(!this.external.has(id)&&t?.mode.startsWith('ptz')&&this.canPredict(k)){
+    if(!this.external.has(id)&&t?.mode.startsWith('ptz')&&this.precisePrediction(k)){
       const inv=invertHomography(t.residual||IDENTITY);if(!inv)return null;
       const p=projectPoint(inv,x*this.width,y*this.height);
       return projectPtz(p[0]/this.width,p[1]/this.height,this.pose!,k.ptzPose!,this.calibration!,this.width/this.height,k.width/k.height);
@@ -255,25 +272,41 @@ export class VisualRegistrationEngine {
     candidates.push(...candidates.splice(0,cursor));
     const projectedFeatures=new Map(candidates.map(k=>[k.id,this.projectFeatures(k)]));
     const visibility=new Map(candidates.map(k=>[k.id,projectedFeatures.get(k.id)!.filter(p=>p&&p[0]>=0&&p[0]<=this.width&&p[1]>=0&&p[1]<=this.height).length]));
-    candidates.sort((a,b)=>(visibility.get(b.id)!-visibility.get(a.id)!) || Number(b.id===this.currentId)-Number(a.id===this.currentId));
+    const poseDistance=(k:Keyframe)=>{
+      if(!this.canPredict(k))return Infinity;
+      const c=this.calibration!,p=this.pose!,r=k.ptzPose!;
+      let pan=r.pan-p.pan;if(c.panPeriod>0)pan-=Math.round(pan/c.panPeriod)*c.panPeriod;
+      return Math.hypot(pan*c.panRadiansPerUnit,(r.tilt-p.tilt)*c.tiltRadiansPerUnit,
+        Math.log(focalAt(r.zoom,c)!/focalAt(p.zoom,c)!));
+    };
+    candidates.sort((a,b)=>{
+      if(this.calibration&&(!this.precisePrediction(a)||!this.precisePrediction(b))){
+        const distance=poseDistance(a)-poseDistance(b);
+        if(Number.isFinite(distance)&&Math.abs(distance)>1e-6)return distance;
+        if(poseDistance(a)<Infinity&&poseDistance(b)===Infinity)return -1;
+        if(poseDistance(b)<Infinity&&poseDistance(a)===Infinity)return 1;
+      }
+      return (visibility.get(b.id)!-visibility.get(a.id)!) || Number(b.id===this.currentId)-Number(a.id===this.currentId);
+    });
     let visualSearches=0;
     const nextTracks=new Map<string,FeatureMatch[]>();
     for(const k of candidates) {
       let predicted:Homography|null=null;
       if(this.canPredict(k)) predicted=ptzHomography(k.ptzPose!,this.pose!,this.calibration!,k.width,k.height,this.width,this.height);
+      const precise=!!predicted&&this.precisePrediction(k);
       const old=this.transforms.get(k.id);
       // Pose is applied every frame, independently of how many views receive a visual search.
       if(predicted)this.transforms.set(k.id,this.predictedTransform(predicted,old,now));
-      if(predicted&&visibility.get(k.id)!<6)continue;
+      if(precise&&visibility.get(k.id)!<6)continue;
       if(visualSearches++>=(this.settings.visualSearchViews??3))continue;
       let matches:FeatureMatch[]=[];
       if(this.previousPyramid&&this.tracks.has(k.id)) {
-        const motion=predicted&&this.previousPose&&this.calibration?
+        const motion=precise&&this.previousPose&&this.calibration?
           ptzHomography(this.previousPose,this.pose!,this.calibration,this.width,this.height,this.width,this.height):null;
         matches=trackMatches(this.previousPyramid,pyramid,this.tracks.get(k.id)!,motion?(x,y)=>projectPoint(motion,x,y):undefined);
       }
       if(matches.length<this.settings.minInliers || this.frameNumber%(this.settings.descriptorIntervalFrames??5)===0) {
-        const geometry=predicted?{predict:(_x:number,_y:number,index:number)=>projectedFeatures.get(k.id)![index],radiusPx:(this.settings.ptzResidualLimitPx??24)*scale*1.5}:undefined;
+        const geometry=precise?{predict:(_x:number,_y:number,index:number)=>projectedFeatures.get(k.id)![index],radiusPx:(this.settings.ptzResidualLimitPx??24)*scale*1.5}:undefined;
         const descriptors=matchFeatures(k.keypoints,this.currentKeypoints,this.settings.matchRatioThreshold,52,geometry);
         const combined=new Map(matches.map(m=>[m.refIdx,m]));
         for(const m of descriptors)combined.set(m.refIdx,m);
@@ -281,7 +314,7 @@ export class VisualRegistrationEngine {
       }
       totalMatches+=matches.length;
       let h:Homography|null=null,accepted:FeatureMatch[]=[],error=0,residual:Homography|undefined;
-      if(predicted) {
+      if(predicted&&precise) {
         const expected=matches.flatMap(m=>{
           const p=projectedFeatures.get(k.id)![m.refIdx];
           if(!p)return [];
@@ -313,7 +346,18 @@ export class VisualRegistrationEngine {
               return [a[0]*(1-alpha)+b[0]*alpha,a[1]*(1-alpha)+b[1]*alpha] as [number,number];});
             h=solveHomography4Points(corners,smooth)||h;
           }
+          if(predicted){
+            const inverse=invertHomography(predicted);
+            if(inverse){
+              // Estimated optics must not reject a valid visual warp just because its correction is large.
+              residual=multiply(h,inverse);
+              const normalizer=Math.abs(residual[8]);
+              if(normalizer>1e-8)residual=residual.map(v=>v/normalizer);
+              h=multiply(residual,predicted);
+            }else{predicted=null;}
+          }
         }
+        if(!h&&predicted){residual=this.retainedResidual(old,now);h=multiply(residual,predicted);}
       }
       if(!h)continue;
       const localMode=predicted?(accepted.length?'ptz+visual':'ptz'):'visual';
@@ -347,7 +391,7 @@ export class VisualRegistrationEngine {
     this.tracks=nextTracks;this.previousPyramid=pyramid;this.previousPose=this.pose;
     const h=this.getHomography();
     return {quality:!this.keyframes.length?'UNINITIALIZED':mode==='ptz'?'DEGRADED':mode!=='uncertain'?'GOOD':now-this.lastGoodAt<Math.min(this.settings.transformMaxAgeMs??500,(this.settings.lostFrameToleranceFrames??8)*this.settings.updateIntervalMs)?'DEGRADED':'LOST',
-      mode,trackingHint:this.getTrackingHint(),poseAgeMs:Number.isFinite(this.poseAge)?this.poseAge:undefined,frameWidth:this.width,frameHeight:this.height,
+      mode,ptzModel:this.getPtzModel(),trackingHint:this.getTrackingHint(),poseAgeMs:Number.isFinite(this.poseAge)?this.poseAge:undefined,frameWidth:this.width,frameHeight:this.height,
       inliers:bestCount,totalMatches,candidateKeypointsRef:this.getReferenceKeypoints().length,candidateKeypointsCur:this.currentKeypoints.length,
       reprojectionError:bestError,homography:h,fps:Math.round(this.fps),processingTimeMs:performance.now()-start,
       scaleEstimate:h?Math.hypot(h[0],h[3]):1,rotationEstimateDeg:h?Math.atan2(h[3],h[0])*180/Math.PI:0,translationEstimate:h?[h[2],h[5]]:[0,0]};

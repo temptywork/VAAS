@@ -48,7 +48,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
 
   const getQualityBadge = () => {
     if (registrationMetrics.mode === 'ptz' || registrationMetrics.mode === 'ptz+visual') {
-      return <span className={registrationMetrics.mode === 'ptz+visual' ? 'text-emerald-300' : 'text-amber-300'}>{registrationMetrics.mode === 'ptz+visual' ? 'PTZ + VISUAL CORRECTION' : 'PTZ PREDICTION'} · {Math.round(registrationMetrics.poseAgeMs || 0)}ms</span>;
+      return <span className={registrationMetrics.mode === 'ptz+visual' ? 'text-emerald-300' : 'text-amber-300'}>{registrationMetrics.mode === 'ptz+visual' ? 'PTZ + VISUAL CORRECTION' : 'PTZ PREDICTION'}{registrationMetrics.ptzModel==='estimated'?' (ESTIMATED)':''} · {Math.round(registrationMetrics.poseAgeMs || 0)}ms</span>;
     }
     if (registrationMetrics.mode === 'simulator') {
       return (

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   ExerciseFeature,
   ExerciseBoundary,
@@ -23,6 +23,7 @@ import { PoseTimeline } from './video/poseTimeline';
 import { connectWebRtc } from './video/webrtc';
 import { cameraIdentity } from './video/cameraIdentity';
 import { PtzCalibrationPanel } from './components/PtzCalibrationPanel';
+import { createPtzModel } from './cv/ptzProjection';
 import { RegistrationRuntime } from './cv/registrationRuntime';
 import { frameTimestamp } from './video/frameTiming';
 import { TacticalCanvas } from './components/TacticalCanvas';
@@ -135,7 +136,12 @@ export default function App() {
   const frameCaptureTimeRef = useRef(0);
   const cameraKey = activeOnvifProfile ? cameraIdentity(onvifConfig, activeOnvifProfile) : '';
   const savedCalibration=calibrations[cameraKey]||(onvifConfig.calibration?.cameraKey===cameraKey?onvifConfig.calibration:null);
-  const calibration=savedCalibration&&(!decodedSize||Math.abs(decodedSize[0]/decodedSize[1]-savedCalibration.aspect)<.02)?savedCalibration:null;
+  const decodedAspect=decodedSize?decodedSize[0]/decodedSize[1]:undefined;
+  const calibration=useMemo(()=>{
+    if(sourceType!=='onvif')return null;
+    if(savedCalibration&&(!decodedAspect||Math.abs(decodedAspect-savedCalibration.aspect)<.02))return savedCalibration;
+    return activeOnvifProfile&&cameraKey?createPtzModel(cameraKey,activeOnvifProfile,decodedAspect):null;
+  },[sourceType,savedCalibration,decodedAspect,activeOnvifProfile,cameraKey]);
   const frameConfigRef = useRef({ calibration, cameraKey });
   frameConfigRef.current = { calibration, cameraKey };
   useEffect(() => { engineRef.current.configurePtz(sourceType === 'onvif' ? calibration : null, cameraKey); }, [sourceType, calibration, cameraKey]);
@@ -538,7 +544,7 @@ export default function App() {
       const aspect=w/h,previous=decodedAspectRef.current;
       if(previous!==null&&Math.abs(previous-aspect)>.02){
         restoreEpochRef.current++;engineRef.current.reset();setSetupViews([]);setSetupActiveViewId(null);setSetupSnapshot(null);setRegistrationSetup(true);
-        requireAnchorPlacement();setSetupNotice('The stream aspect ratio changed. Capture new anchor views and update PTZ calibration for this image geometry.');
+        requireAnchorPlacement();setSetupNotice('The stream aspect ratio changed. Capture new anchor views for this image geometry; PTZ calibration remains optional.');
       }
       decodedAspectRef.current=aspect;setDecodedSize([w,h]);
     };
@@ -1432,12 +1438,12 @@ export default function App() {
 
         {/* Shared PTZ controls for the exercise simulator and a real ONVIF camera */}
         {setupNotice && <div className="absolute top-2 left-2 right-2 z-40 rounded bg-amber-950/95 p-3 text-xs text-amber-100" role="status">{setupNotice}<button onClick={()=>setSetupNotice('')} className="ml-4 underline">Dismiss</button></div>}
-        {sourceType==='onvif' && isVideoReady && <button onClick={()=>setCalibrationOpen(v=>!v)} className="absolute right-3 bottom-3 z-40 rounded border border-sky-500 bg-slate-900 px-3 py-2 text-xs text-sky-200">{calibration?.validated?'PTZ calibration':'Calibrate PTZ anchoring'}</button>}
+        {sourceType==='onvif' && isVideoReady && <button onClick={()=>setCalibrationOpen(v=>!v)} className="absolute right-3 bottom-3 z-40 rounded border border-sky-500 bg-slate-900 px-3 py-2 text-xs text-sky-200">Improve PTZ accuracy (optional)</button>}
         {sourceType==='onvif' && calibrationOpen && activeOnvifProfile && <PtzCalibrationPanel key={`${cameraKey}:${onvifConfig.transport||'webrtc'}`}
           cameraKey={cameraKey} profile={activeOnvifProfile} calibration={calibration}
           capture={()=>{const c=cvCanvasRef.current;
             const time=frameCaptureTimeRef.current-performance.timeOrigin;
-            if(!c||!framePoseRef.current||performance.now()-lastFrameAtRef.current>400||!poseTimelineRef.current.isSettled(time,calibration?.panPeriod??2))return null;
+            if(!c||!framePoseRef.current||performance.now()-lastFrameAtRef.current>400||!poseTimelineRef.current.isSettled(time,calibration?.panPeriod??2,300))return null;
             return {image:c.toDataURL('image/jpeg',0.9),width:c.width,height:c.height,pose:framePoseRef.current};}}
           transport={onvifConfig.transport||'webrtc'}
           onSave={value=>{

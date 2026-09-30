@@ -1,21 +1,33 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { access, chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { access, mkdir, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 async function freePort(): Promise<number> {
-  return new Promise(r => {
-    const s = createServer().listen(58080, '127.0.0.1', () => s.close(() => r(58080)));
-    s.on('error', () => createServer().listen(0, '127.0.0.1', function () {
-      const p = (s.address() as any).port;
-      s.close(() => r(p));
-    }));
+  const allocate = (port: number): Promise<number> => new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close();
+        reject(new Error('Could not allocate the gateway API port.'));
+        return;
+      }
+      const allocatedPort = address.port;
+      server.close(error => error ? reject(error) : resolve(allocatedPort));
+    });
   });
+  try {
+    return await allocate(58080);
+  } catch {
+    return allocate(0);
+  }
 }
 
-/** Camera credentials are stored only in a private, per-session temporary configuration. */
+/** Camera credentials are stored in a private, per-session configuration under .tools. */
 export class VideoGateway {
   private child:ChildProcess|null=null;
   private directory='';
@@ -26,19 +38,19 @@ export class VideoGateway {
     const binary=path.resolve(process.env.GO2RTC_PATH||path.join('.tools',process.platform==='win32'?'go2rtc.exe':'go2rtc'));
     try{await access(binary,process.platform==='win32'?constants.F_OK:constants.X_OK);}
     catch{throw new Error('Video gateway is not installed or executable. Run npm run setup:video, or set GO2RTC_PATH to its executable.');}
-    const mediaPort=Number(process.env.GO2RTC_WEBRTC_PORT||8555);
-    if(!Number.isInteger(mediaPort)||mediaPort<1||mediaPort>65535)throw new Error('GO2RTC_WEBRTC_PORT must be a valid port.');
-    const mediaHost=process.env.GO2RTC_WEBRTC_HOST||'127.0.0.1';
-    const listenHost=mediaHost.includes(':')?`[${mediaHost}]`:mediaHost;
-    const candidates=process.env.GO2RTC_CANDIDATE?.split(',').map(s=>s.trim()).filter(Boolean);
     try {
       const port=await freePort();this.url=`http://127.0.0.1:${port}`;
-      this.directory=await mkdtemp(path.join(tmpdir(),'vaas-go2rtc-'));
-      if(process.platform!=='win32')await chmod(this.directory,0o700);
-      const configuration={api:{listen:`127.0.0.1:${port}`},rtsp:{listen:''},
-        webrtc:{listen:`${listenHost}:${mediaPort}`,ice_servers:[],
-          candidates:candidates?.length?candidates:mediaHost==='127.0.0.1'?[`127.0.0.1:${mediaPort}`]:[]},
-        streams:{camera:[rtspUrl]},log:{level:'warn'}};
+      const toolsDirectory = path.resolve('.tools');
+      await mkdir(toolsDirectory, { recursive: true });
+      this.directory = path.join(toolsDirectory, `go2rtc-${randomUUID()}`);
+      await mkdir(this.directory, { mode: 0o700 });
+      const configuration = {
+        api: { listen: `127.0.0.1:${port}` },
+        rtsp: { listen: '' },
+        webrtc: { listen: '127.0.0.1:8555' },
+        streams: { camera: [rtspUrl] },
+        log: { level: 'warn' },
+      };
       const file=path.join(this.directory,'go2rtc.yaml');
       await writeFile(file,JSON.stringify(configuration),{mode:0o600});
       const child=spawn(binary,['-config',file],{stdio:['ignore','ignore','pipe'],windowsHide:true});this.child=child;

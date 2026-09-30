@@ -2,8 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { VideoGateway } from './videoGateway.ts';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { Buffer } from 'node:buffer';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -372,7 +371,10 @@ async function startStream(session: OnvifSession, profileToken?: string): Promis
     await session.gateway.start(applyStreamSettings(streamUri, session.config));
     return selected;
   }
-  const directory = await mkdtemp(path.join(tmpdir(), 'vaas-onvif-'));
+  const toolsDirectory = path.resolve('.tools');
+  await mkdir(toolsDirectory, { recursive: true });
+  const directory = path.join(toolsDirectory, `onvif-${randomUUID()}`);
+  await mkdir(directory, { mode: 0o700 });
   session.streamDirectory = directory;
   session.ffmpegError = '';
   const playlistPath = path.join(directory, 'index.m3u8');

@@ -155,14 +155,14 @@ export const OnvifSetupModal: React.FC<OnvifSetupModalProps> = ({
               <option value="hls">HLS — compatibility fallback, requires FFmpeg</option>
             </select>
           </label>
-          <p className="text-xs text-slate-400">WebRTC uses the local video gateway and a standard H.264 camera profile. Once video is playing, choose Calibrate PTZ Anchoring to measure camera movement and zoom.</p>
+          <p className="text-xs text-slate-400">WebRTC uses the local video gateway and a standard H.264 camera profile. PTZ telemetry is combined with visual tracking immediately. Improve PTZ accuracy is optional and starts with four landmark samples.</p>
           {selected&&<div className="rounded border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
             <p>Reported stream: {selected.width||'?'}×{selected.height||'?'} · {selected.frameRate||'?'} fps · {selected.bitrate||'?'} kbps</p>
             <p className="mt-1">Encoding: {selected.encoding}{selected.h264Profile?` (${selected.h264Profile})`:''} · Keyframe interval: {selected.keyframeInterval||'?'} frames</p>
             <p className="mt-1">PTZ position units: {selected.ptz?.panTiltSpace?.includes('Spherical')?'degrees':'normalized or unspecified'}</p>
             {selected.ptz&&<p className="mt-1">Pan: {selected.ptz.panRange?.join(' to ')||'not reported'} · Tilt: {selected.ptz.tiltRange?.join(' to ')||'not reported'} · Zoom: {selected.ptz.zoomRange?.join(' to ')||'not reported'}</p>}
             {selected.crop&&<p className="mt-1">Source bounds: {selected.crop.width}×{selected.crop.height} at {selected.crop.x},{selected.crop.y}</p>}
-            <p className="mt-2">Decoded image dimensions determine processing and aspect ratio. Calibrate each profile separately; setup views retain their camera position.</p>
+            <p className="mt-2">Decoded image dimensions determine processing and aspect ratio. Optional calibration is saved per profile; setup views retain their camera position.</p>
           </div>}
           {unsupported&&<p className="text-xs text-amber-300">Select an H.264 profile for WebRTC, or choose HLS playback for this stream encoding.</p>}
 

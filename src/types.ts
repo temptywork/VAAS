@@ -63,6 +63,7 @@ export type RegistrationQuality = 'GOOD' | 'DEGRADED' | 'LOST' | 'UNINITIALIZED'
 
 export interface RegistrationMetrics {
   mode?: 'visual' | 'ptz' | 'ptz+visual' | 'uncertain' | 'simulator';
+  ptzModel?: 'estimated' | 'fitted';
   poseAgeMs?: number;
   frameWidth?: number;
   frameHeight?: number;
@@ -111,6 +112,10 @@ export interface PtzCapabilities {
 /** Calibration uses camera-to-world yaw/pitch and square pixels. Focal length is in image widths. */
 export interface PtzCalibration {
   version: 1;
+  modelSource?: 'estimated' | 'fitted';
+  refinement?: 'basic' | 'full';
+  sampleCount?: number;
+  measuredZoomRange?: [number, number];
   cameraKey: string;
   panRadiansPerUnit: number;
   tiltRadiansPerUnit: number;

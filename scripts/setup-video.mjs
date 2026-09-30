@@ -1,5 +1,5 @@
-import { access, readFile, rename, mkdir, writeFile, chmod, mkdtemp, rm, copyFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { access, readFile, rename, mkdir, writeFile, chmod, rm, copyFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { config as loadEnv } from 'dotenv';
@@ -8,7 +8,8 @@ loadEnv({path:'.env.local',quiet:true});
 const version='v1.9.14';
 const assets={darwin:{arm64:'mac_arm64.zip',x64:'mac_amd64.zip'},win32:{x64:'win64.zip',arm64:'win_arm64.zip',ia32:'win32.zip'},linux:{x64:'linux_amd64',arm64:'linux_arm64'}};
 const name=process.platform==='win32'?'go2rtc.exe':'go2rtc';
-const destination=path.join('.tools',name),marker=path.join('.tools','go2rtc.version');
+const toolsDirectory = path.resolve('.tools');
+const destination=path.join(toolsDirectory,name),marker=path.join(toolsDirectory,'go2rtc.version');
 if(process.env.GO2RTC_PATH){
   await access(process.env.GO2RTC_PATH);console.log('Using GO2RTC_PATH; bundled gateway download skipped.');process.exit(0);
 }
@@ -19,7 +20,9 @@ const asset=assets[process.platform]?.[process.arch];
 if(!asset)throw new Error('Unsupported platform. Download go2rtc manually and set GO2RTC_PATH.');
 const response=await fetch(`https://github.com/AlexxIT/go2rtc/releases/download/${version}/go2rtc_${asset}`,{signal:AbortSignal.timeout(60000)});
 if(!response.ok)throw new Error(`Gateway download failed (${response.status}).`);
-const directory=await mkdtemp(path.join(tmpdir(),'vaas-gateway-install-'));
+await mkdir(toolsDirectory, { recursive: true });
+const directory = path.join(toolsDirectory, `install-go2rtc-${randomUUID()}`);
+await mkdir(directory, { mode: 0o700 });
 try {
   const archive=path.join(directory,asset.endsWith('.zip')?'gateway.zip':'go2rtc');
   await writeFile(archive,Buffer.from(await response.arrayBuffer()));
@@ -29,8 +32,7 @@ try {
     const result=spawnSync(command,args,{stdio:'inherit',env:{...process.env,VAAS_ARCHIVE:archive,VAAS_EXTRACT:directory}});
     if(result.status!==0)throw new Error('Could not extract the gateway archive.');
   }
-  await mkdir('.tools',{recursive:true});
-  const staged=path.join('.tools',`${name}.${process.pid}.new`);
+  const staged=path.join(toolsDirectory,`${name}.${process.pid}.new`);
   try{
     await copyFile(path.join(directory,name),staged);
     if(process.platform!=='win32')await chmod(staged,0o755);

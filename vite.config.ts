@@ -8,7 +8,7 @@ import { onvifBridge } from './server/onvifBridge.ts';
 
 export default defineConfig(({command, mode}) => {
   const env = loadEnv(mode, process.cwd(), '');
-  for (const key of ['GO2RTC_PATH', 'GO2RTC_WEBRTC_PORT', 'GO2RTC_WEBRTC_HOST', 'GO2RTC_CANDIDATE', 'FFMPEG_PATH']) {
+  for (const key of ['GO2RTC_PATH', 'FFMPEG_PATH']) {
     if (!process.env[key] && env[key]) process.env[key] = env[key];
   }
   const certFile = env.VITE_DEV_TLS_CERT?.trim();
