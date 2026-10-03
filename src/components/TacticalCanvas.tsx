@@ -13,6 +13,13 @@ import { projectPoint, invertHomography } from '../cv/homography';
 import { VisualRegistrationEngine } from '../cv/registrationEngine';
 import { ExerciseTerrainRenderer, SimulatorCameraState } from './ExerciseTerrainRenderer';
 import {
+  screenToPtzAnchor,
+  ptzAnchorToScreen,
+  fusePtzAndHomography,
+  normalizeAngleDeg,
+  getCameraFov,
+} from '../utils/ptzMath';
+import {
   AlertTriangle,
   Compass,
   Crosshair,
@@ -20,7 +27,15 @@ import {
   Trash2,
   RotateCw,
   Palette,
+  Navigation,
+  FlipHorizontal,
+  FlipVertical,
+  Copy,
+  Lock,
+  Unlock,
+  Radio,
 } from 'lucide-react';
+import { PtzAnchor } from '../types';
 
 interface TacticalCanvasProps {
   engine: VisualRegistrationEngine;
@@ -37,15 +52,21 @@ interface TacticalCanvasProps {
   pendingFeatureLabel: string;
   pendingFeatureColor?: string;
   pendingFeatureCustomImage?: string;
-  onAddFeaturePoint: (refPoint: [number, number]) => void;
-  onAddBoundaryPoint: (refPoint: [number, number]) => void;
+  onAddFeaturePoint: (refPoint: [number, number], ptzAnchor?: PtzAnchor) => void;
+  onAddBoundaryPoint: (refPoint: [number, number], ptzAnchor?: PtzAnchor) => void;
   onSelectFeature: (feature: ExerciseFeature | null) => void;
   selectedFeatureId: string | null;
   onUpdateFeature: (feature: ExerciseFeature) => void;
   onDeleteFeature: (id: string) => void;
+  onDuplicateFeature?: (feature: ExerciseFeature) => void;
   registrationMetrics: RegistrationMetrics;
   overlaySettings: OverlaySettings;
   videoElement: HTMLVideoElement | null;
+  ptzPan?: number;
+  ptzTilt?: number;
+  ptzZoom?: number;
+  onvifConnected?: boolean;
+  onSlewToObject?: (pan: number, tilt: number, zoom?: number) => void;
 }
 
 export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
@@ -69,15 +90,36 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
   selectedFeatureId,
   onUpdateFeature,
   onDeleteFeature,
+  onDuplicateFeature,
   registrationMetrics,
   overlaySettings,
   videoElement,
+  ptzPan,
+  ptzTilt,
+  ptzZoom,
+  onvifConnected = false,
+  onSlewToObject,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const terrainRendererRef = useRef<ExerciseTerrainRenderer>(new ExerciseTerrainRenderer());
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  const ffmpegImgRef = useRef<HTMLImageElement | null>(null);
+  const activeEdgeIndicatorsRef = useRef<
+    Array<{
+      featureId: string;
+      label: string;
+      color: string;
+      edgeX: number;
+      edgeY: number;
+      angleDeg: number;
+      distanceDeg: number;
+      panDeg: number;
+      tiltDeg: number;
+      zoom?: number;
+    }>
+  >([]);
 
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
   const [isHoveringFeature, setIsHoveringFeature] = useState(false);
@@ -88,6 +130,14 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
     offscreen.width = 640;
     offscreen.height = 360;
     offscreenCanvasRef.current = offscreen;
+  }, []);
+
+  // Pre-load FFmpeg stream image for fast canvas draw
+  useEffect(() => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src = '/api/ffmpeg/stream';
+    ffmpegImgRef.current = img;
   }, []);
 
   // Main Render Loop
@@ -106,9 +156,32 @@ export const TacticalCanvas: React.FC<TacticalCanvasProps> = ({
       const width = canvas.width;
       const height = canvas.height;
 
+      // PTZ is only active when stream is from ONVIF PTZ camera
+      const isPtzActive = sourceType === 'onvif_ffmpeg' || Boolean(onvifConnected);
+
+      // Effective Pan, Tilt, Zoom for unified coordinate referencing
+      const effectivePan = ptzPan !== undefined ? ptzPan : (simState.panX / 640) * 60;
+      const effectiveTilt = ptzTilt !== undefined ? ptzTilt : (simState.tiltY / 360) * 35;
+      const effectiveZoom = ptzZoom !== undefined ? ptzZoom : simState.zoom;
+
       // 1. Render Video Source
       if (sourceType === 'simulator') {
         terrainRendererRef.current.render(ctx, width, height, simState);
+      } else if (sourceType === 'onvif_ffmpeg') {
+        if (
+          ffmpegImgRef.current &&
+          ffmpegImgRef.current.complete &&
+          ffmpegImgRef.current.naturalWidth > 0
+        ) {
+          ctx.drawImage(ffmpegImgRef.current, 0, 0, width, height);
+        } else {
+          ctx.fillStyle = '#090d16';
+          ctx.fillRect(0, 0, width, height);
+          ctx.fillStyle = '#f59e0b';
+          ctx.font = '13px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('STREAMING FROM ONVIF / FFMPEG PIPELINE (/api/ffmpeg/stream)...', width / 2, height / 2);
+        }
       } else if ((sourceType === 'webcam' || sourceType === 'rear_camera') && videoElement && videoElement.readyState >= 2) {
         ctx.drawImage(videoElement, 0, 0, width, height);
       } else if (sourceType === 'webcam' || sourceType === 'rear_camera') {
@@ -355,11 +428,106 @@ function hexToRgba(hex: string, alpha: number) {
         }
       }
 
-      // 5. Draw Exercise Features (Symbols and Labels)
+      // 5. Draw Exercise Features (Symbols and Labels) Referenced by PTZ Kinematics + CV Homography
+      const currentEdgeIndicators: Array<{
+        featureId: string;
+        label: string;
+        color: string;
+        edgeX: number;
+        edgeY: number;
+        angleDeg: number;
+        distanceDeg: number;
+        panDeg: number;
+        tiltDeg: number;
+        zoom?: number;
+      }> = [];
+
       if (overlaySettings.showSymbols && isMasterLayersVisible) {
         features.forEach((feat) => {
           if (!feat.visible) return;
-          const [cx, cy] = transformCoord(feat.x, feat.y);
+
+          let cx: number;
+          let cy: number;
+          let currentScale = 1.0;
+
+          if (isPtzActive) {
+            // Resolve PTZ anchor (generate for baseline features if not already set)
+            const anchor: PtzAnchor =
+              feat.ptzAnchor ||
+              screenToPtzAnchor(
+                feat.x,
+                feat.y,
+                width,
+                height,
+                0, // reference pan 0
+                0, // reference tilt 0
+                1.0 // reference zoom 1x
+              );
+
+            // Project PTZ Anchor to Current Screen
+            const ptzProj = ptzAnchorToScreen(
+              anchor,
+              effectivePan,
+              effectiveTilt,
+              effectiveZoom,
+              width,
+              height
+            );
+
+            // If outside camera field of view, record edge indicator
+            if (!ptzProj.inFrustum) {
+              if (ptzProj.edgeIndicator) {
+                currentEdgeIndicators.push({
+                  featureId: feat.id,
+                  label: feat.label,
+                  color: feat.color || '#38bdf8',
+                  edgeX: ptzProj.edgeIndicator.edgeX,
+                  edgeY: ptzProj.edgeIndicator.edgeY,
+                  angleDeg: ptzProj.edgeIndicator.angleDeg,
+                  distanceDeg: ptzProj.edgeIndicator.distanceDeg,
+                  panDeg: anchor.panDeg,
+                  tiltDeg: anchor.tiltDeg,
+                  zoom: anchor.placedAtZoom,
+                });
+              }
+              return;
+            }
+
+            // In-frustum: Fuse PTZ prediction with CV Homography
+            const homoPoint = transformCoord(feat.x, feat.y);
+            const fused = fusePtzAndHomography(
+              [ptzProj.x, ptzProj.y],
+              H ? homoPoint : null,
+              registrationMetrics.quality,
+              false
+            );
+            cx = fused[0];
+            cy = fused[1];
+            currentScale = ptzProj.scaleFactor;
+          } else {
+            // Pure Visual CV Tracking (Webcam, Mobile Rear Camera, RTSP, Sim without ONVIF)
+            // Augments and sticks directly to physical ground/scene texture via homography
+            if (H && registrationMetrics.quality !== 'LOST' && registrationMetrics.quality !== 'UNINITIALIZED') {
+              const projected = transformCoord(feat.x, feat.y);
+              cx = projected[0];
+              cy = projected[1];
+              currentScale = registrationMetrics.scaleEstimate || 1.0;
+            } else {
+              // When tracking lost or uninitialized, hold at original reference coordinates
+              cx = feat.x;
+              cy = feat.y;
+              currentScale = 1.0;
+            }
+          }
+
+          const baseScale = (feat.scale || 1.0) * overlaySettings.symbolScale * currentScale;
+          const symbolSize = 24 * Math.max(0.4, Math.min(3.0, baseScale));
+
+          // If completely off-viewport in pure visual mode, skip rendering
+          if (cx < -symbolSize * 2 || cx > width + symbolSize * 2 || cy < -symbolSize * 2 || cy > height + symbolSize * 2) {
+            return;
+          }
+
           const isSelected = feat.id === selectedFeatureId;
           const def = FEATURE_LIBRARY[feat.type] || FEATURE_LIBRARY.tank;
 
@@ -370,9 +538,6 @@ function hexToRgba(hex: string, alpha: number) {
           if (feat.rotation) {
             ctx.rotate((feat.rotation * Math.PI) / 180);
           }
-
-          const baseScale = (feat.scale || 1.0) * overlaySettings.symbolScale;
-          const symbolSize = 24 * baseScale;
 
           // Highlight ring if selected
           if (isSelected) {
@@ -385,6 +550,11 @@ function hexToRgba(hex: string, alpha: number) {
             ctx.setLineDash([]);
           }
 
+          // Apply feature-specific opacity if provided
+          if (feat.opacity !== undefined) {
+            ctx.globalAlpha = feat.opacity * overlaySettings.opacity;
+          }
+
           // Draw Custom SVG/JPG Symbol or Standard Military Shape
           if (feat.customImage) {
             let img = imageCacheRef.current.get(feat.customImage);
@@ -392,6 +562,11 @@ function hexToRgba(hex: string, alpha: number) {
               img = new Image();
               img.src = feat.customImage;
               imageCacheRef.current.set(feat.customImage, img);
+            }
+
+            // Apply horizontal/vertical flips (PRD Section 18)
+            if (feat.flipH || feat.flipV) {
+              ctx.scale(feat.flipH ? -1 : 1, feat.flipV ? -1 : 1);
             }
 
             // Tactical badge background and border
@@ -483,7 +658,6 @@ function hexToRgba(hex: string, alpha: number) {
                 ctx.stroke();
                 ctx.strokeStyle = '#ffffff';
                 ctx.lineWidth = 1.5;
-                // Antenna waves
                 ctx.beginPath();
                 ctx.arc(0, 0, symbolSize * 0.2, -Math.PI * 0.8, -Math.PI * 0.2);
                 ctx.stroke();
@@ -539,6 +713,31 @@ function hexToRgba(hex: string, alpha: number) {
                 ctx.fill();
                 ctx.stroke();
                 break;
+
+              case 'marker': // Generic Marker (PRD Section 17)
+                ctx.beginPath();
+                ctx.arc(0, 0, symbolSize * 0.45, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(-symbolSize * 0.35, 0); ctx.lineTo(symbolSize * 0.35, 0);
+                ctx.moveTo(0, -symbolSize * 0.35); ctx.lineTo(0, symbolSize * 0.35);
+                ctx.stroke();
+                break;
+
+              case 'text': // Text Label (PRD Section 17)
+                ctx.beginPath();
+                ctx.rect(-symbolSize * 0.6, -symbolSize * 0.3, symbolSize * 1.2, symbolSize * 0.6);
+                ctx.fill();
+                ctx.stroke();
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 9px monospace';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('TXT', 0, 0);
+                break;
             }
           }
 
@@ -569,6 +768,142 @@ function hexToRgba(hex: string, alpha: number) {
 
           ctx.restore();
         });
+      }
+
+      // 5b. Save current edge indicators for click testing
+      activeEdgeIndicatorsRef.current = currentEdgeIndicators;
+
+      // 5c. Draw Off-Screen PTZ Directional Edge Badges (Target out of camera FOV) - ONVIF PTZ only
+      if (
+        isPtzActive &&
+        overlaySettings.showOffscreenPtzIndicators !== false &&
+        isMasterLayersVisible &&
+        currentEdgeIndicators.length > 0
+      ) {
+        currentEdgeIndicators.forEach((ind) => {
+          ctx.save();
+          ctx.translate(ind.edgeX, ind.edgeY);
+
+          // Pointer chevron rotated towards target
+          ctx.rotate((ind.angleDeg * Math.PI) / 180);
+
+          ctx.fillStyle = 'rgba(15, 23, 42, 0.95)';
+          ctx.strokeStyle = ind.color;
+          ctx.lineWidth = 1.5;
+
+          ctx.beginPath();
+          ctx.moveTo(14, 0);
+          ctx.lineTo(-8, -10);
+          ctx.lineTo(-4, 0);
+          ctx.lineTo(-8, 10);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+
+          // Reset rotation for text label
+          ctx.rotate(-(ind.angleDeg * Math.PI) / 180);
+
+          // Tactical Badge showing Label + Delta Bearing
+          const deltaPan = normalizeAngleDeg(ind.panDeg - effectivePan);
+          const badgeText = `${ind.label.slice(0, 10)} ${deltaPan >= 0 ? `+${deltaPan.toFixed(0)}°` : `${deltaPan.toFixed(0)}°`}`;
+          ctx.font = 'bold 9px monospace';
+          const tw = ctx.measureText(badgeText).width;
+
+          ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+          ctx.strokeStyle = ind.color;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(-tw / 2 - 4, 12, tw + 8, 14, 3);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = '#ffffff';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(badgeText, 0, 19);
+
+          ctx.restore();
+        });
+      }
+
+      // 5d. Top Azimuth Heading Ribbon & Elevation Indicator (Military PTZ HUD)
+      if (overlaySettings.showHUD && isMasterLayersVisible) {
+        ctx.save();
+        const tapeW = Math.min(380, width * 0.45);
+        const tapeH = 22;
+        const tapeX = width / 2 - tapeW / 2;
+        const tapeY = 12;
+
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.4)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(tapeX, tapeY, tapeW, tapeH, 4);
+        ctx.fill();
+        ctx.stroke();
+
+        // Center cursor triangle
+        ctx.fillStyle = '#38bdf8';
+        ctx.beginPath();
+        ctx.moveTo(width / 2, tapeY + tapeH);
+        ctx.lineTo(width / 2 - 5, tapeY + tapeH + 6);
+        ctx.lineTo(width / 2 + 5, tapeY + tapeH + 6);
+        ctx.closePath();
+        ctx.fill();
+
+        // Heading ticks
+        ctx.clip();
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        const normPan = normalizeAngleDeg(effectivePan);
+        const headingDeg = (normPan + 360) % 360;
+
+        for (let deg = -180; deg <= 540; deg += 10) {
+          const diff = deg - headingDeg;
+          const tickX = width / 2 + diff * 3.5;
+          if (tickX >= tapeX - 20 && tickX <= tapeX + tapeW + 20) {
+            ctx.strokeStyle = deg % 30 === 0 ? '#38bdf8' : 'rgba(56, 189, 248, 0.4)';
+            ctx.beginPath();
+            ctx.moveTo(tickX, tapeY);
+            ctx.lineTo(tickX, tapeY + (deg % 30 === 0 ? 9 : 5));
+            ctx.stroke();
+
+            if (deg % 30 === 0) {
+              const d360 = ((deg % 360) + 360) % 360;
+              let cardinal = `${d360.toString().padStart(3, '0')}°`;
+              if (d360 === 0) cardinal = 'N 000°';
+              else if (d360 === 90) cardinal = 'E 090°';
+              else if (d360 === 180) cardinal = 'S 180°';
+              else if (d360 === 270) cardinal = 'W 270°';
+
+              ctx.fillStyle = deg % 90 === 0 ? '#38bdf8' : '#94a3b8';
+              ctx.fillText(cardinal, tickX, tapeY + 14);
+            }
+          }
+        }
+        ctx.restore();
+
+        // Pitch / Elevation display on right side
+        ctx.save();
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
+        ctx.strokeStyle = 'rgba(245, 158, 11, 0.4)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(width - 92, tapeY, 80, tapeH, 4);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#f59e0b';
+        ctx.font = 'bold 9px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(
+          `EL: ${effectiveTilt >= 0 ? `+${effectiveTilt.toFixed(1)}°` : `${effectiveTilt.toFixed(1)}°`}`,
+          width - 52,
+          tapeY + tapeH / 2
+        );
+        ctx.restore();
       }
 
       // 6. Registration Lost Warning Banner (Frozen Overlays per PRD Section 16 & 29)
@@ -612,6 +947,29 @@ function hexToRgba(hex: string, alpha: number) {
         ctx.font = '11px monospace';
         ctx.textAlign = 'center';
         ctx.fillText(pendingFeatureLabel || 'CLICK TO PLACE', 0, 32);
+        ctx.restore();
+      }
+
+      // 8. Persistent Simulation / Exercise Watermark (PRD Section 36)
+      if (overlaySettings.showWatermark !== false) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
+        ctx.strokeStyle = 'rgba(245, 158, 11, 0.4)';
+        ctx.lineWidth = 1;
+        const wmW = 390;
+        const wmH = 22;
+        const wmX = 14;
+        const wmY = height - 34;
+        ctx.beginPath();
+        ctx.roundRect(wmX, wmY, wmW, wmH, 4);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#f59e0b';
+        ctx.font = 'bold 9.5px monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('⚡ SIMULATED / EXERCISE USE ONLY • NOT VERIFIED TARGETS', wmX + 8, wmY + wmH / 2);
         ctx.restore();
       }
 
@@ -668,6 +1026,16 @@ function hexToRgba(hex: string, alpha: number) {
     const screenX = e.clientX - rect.x;
     const screenY = e.clientY - rect.y;
 
+    // 1. Check if user clicked an off-screen edge indicator to slew camera directly to that object!
+    if (onSlewToObject && activeEdgeIndicatorsRef.current.length > 0) {
+      for (const ind of activeEdgeIndicatorsRef.current) {
+        if (Math.hypot(screenX - ind.edgeX, screenY - ind.edgeY) <= 26) {
+          onSlewToObject(ind.panDeg, ind.tiltDeg, ind.zoom);
+          return;
+        }
+      }
+    }
+
     const H = engine.getHomography();
     const invH = H ? invertHomography(H) : null;
 
@@ -678,45 +1046,90 @@ function hexToRgba(hex: string, alpha: number) {
     let refCoordX = screenX;
     let refCoordY = screenY;
 
-    if (invH) {
+    if (invH && registrationMetrics.quality !== 'UNINITIALIZED' && registrationMetrics.quality !== 'LOST') {
       const [invX, invY] = projectPoint(invH, normCurX, normCurY);
       refCoordX = (invX / 640) * canvas.width;
       refCoordY = (invY / 360) * canvas.height;
     }
 
+    const effPan = ptzPan !== undefined ? ptzPan : (simState.panX / 640) * 60;
+    const effTilt = ptzTilt !== undefined ? ptzTilt : (simState.tiltY / 360) * 35;
+    const effZoom = ptzZoom !== undefined ? ptzZoom : simState.zoom;
+
+    const ptzAnchor = screenToPtzAnchor(
+      screenX,
+      screenY,
+      canvas.width,
+      canvas.height,
+      effPan,
+      effTilt,
+      effZoom
+    );
+
     // If placing a new feature:
     if (pendingFeatureType) {
-      onAddFeaturePoint([refCoordX, refCoordY]);
+      onAddFeaturePoint([refCoordX, refCoordY], ptzAnchor);
       return;
     }
 
     // If drawing boundary:
     if (isDrawingBoundary) {
-      onAddBoundaryPoint([refCoordX, refCoordY]);
+      onAddBoundaryPoint([refCoordX, refCoordY], ptzAnchor);
       return;
     }
 
     // Otherwise, check if user clicked an existing feature to select it (only if features are currently visible)
     let clickedFeature: ExerciseFeature | null = null;
     const isMasterVisible = overlaySettings.showAllLayers !== false && overlaySettings.showSymbols !== false;
+    const isPtzActive = sourceType === 'onvif_ffmpeg' || Boolean(onvifConnected);
+
     if (isMasterVisible) {
       for (let i = features.length - 1; i >= 0; i--) {
         const feat = features[i];
         if (!feat.visible) continue;
-        // Project ref coordinates to current screen
         let featScreenX = feat.x;
         let featScreenY = feat.y;
-        if (H) {
-          const [px, py] = projectPoint(
-            H,
-            (feat.x / canvas.width) * 640,
-            (feat.y / canvas.height) * 360
-          );
-          featScreenX = (px / 640) * canvas.width;
-          featScreenY = (py / 360) * canvas.height;
+
+        if (isPtzActive) {
+          const anchor = feat.ptzAnchor || screenToPtzAnchor(feat.x, feat.y, canvas.width, canvas.height, 0, 0, 1.0);
+          const ptzProj = ptzAnchorToScreen(anchor, effPan, effTilt, effZoom, canvas.width, canvas.height);
+          if (!ptzProj.inFrustum) continue;
+
+          featScreenX = ptzProj.x;
+          featScreenY = ptzProj.y;
+          if (H) {
+            const [px, py] = projectPoint(
+              H,
+              (feat.x / canvas.width) * 640,
+              (feat.y / canvas.height) * 360
+            );
+            const [fusedX, fusedY] = fusePtzAndHomography(
+              [ptzProj.x, ptzProj.y],
+              [(px / 640) * canvas.width, (py / 360) * canvas.height],
+              registrationMetrics.quality,
+              false
+            );
+            featScreenX = fusedX;
+            featScreenY = fusedY;
+          }
+        } else {
+          // Pure Visual CV Tracking
+          if (H && registrationMetrics.quality !== 'LOST' && registrationMetrics.quality !== 'UNINITIALIZED') {
+            const [px, py] = projectPoint(
+              H,
+              (feat.x / canvas.width) * 640,
+              (feat.y / canvas.height) * 360
+            );
+            featScreenX = (px / 640) * canvas.width;
+            featScreenY = (py / 360) * canvas.height;
+          } else {
+            featScreenX = feat.x;
+            featScreenY = feat.y;
+          }
         }
+
         const dist = Math.hypot(screenX - featScreenX, screenY - featScreenY);
-        if (dist <= 24) {
+        if (dist <= 26) {
           clickedFeature = feat;
           break;
         }
@@ -739,19 +1152,52 @@ function hexToRgba(hex: string, alpha: number) {
     const isMasterVisible = overlaySettings.showAllLayers !== false && overlaySettings.showSymbols !== false;
     if (isMasterVisible) {
       const H = engine.getHomography();
+      const isPtzActive = sourceType === 'onvif_ffmpeg' || Boolean(onvifConnected);
+      const effPan = ptzPan !== undefined ? ptzPan : (simState.panX / 640) * 60;
+      const effTilt = ptzTilt !== undefined ? ptzTilt : (simState.tiltY / 360) * 35;
+      const effZoom = ptzZoom !== undefined ? ptzZoom : simState.zoom;
+
       for (const feat of features) {
         if (!feat.visible) continue;
         let fx = feat.x;
         let fy = feat.y;
-        if (H) {
-          const [px, py] = projectPoint(
-            H,
-            (feat.x / canvas.width) * 640,
-            (feat.y / canvas.height) * 360
-          );
-          fx = (px / 640) * canvas.width;
-          fy = (py / 360) * canvas.height;
+
+        if (isPtzActive) {
+          const anchor = feat.ptzAnchor || screenToPtzAnchor(feat.x, feat.y, canvas.width, canvas.height, 0, 0, 1.0);
+          const ptzProj = ptzAnchorToScreen(anchor, effPan, effTilt, effZoom, canvas.width, canvas.height);
+          if (!ptzProj.inFrustum) continue;
+          fx = ptzProj.x;
+          fy = ptzProj.y;
+          if (H) {
+            const [px, py] = projectPoint(
+              H,
+              (feat.x / canvas.width) * 640,
+              (feat.y / canvas.height) * 360
+            );
+            const [fusedX, fusedY] = fusePtzAndHomography(
+              [ptzProj.x, ptzProj.y],
+              [(px / 640) * canvas.width, (py / 360) * canvas.height],
+              registrationMetrics.quality,
+              false
+            );
+            fx = fusedX;
+            fy = fusedY;
+          }
+        } else {
+          if (H && registrationMetrics.quality !== 'LOST' && registrationMetrics.quality !== 'UNINITIALIZED') {
+            const [px, py] = projectPoint(
+              H,
+              (feat.x / canvas.width) * 640,
+              (feat.y / canvas.height) * 360
+            );
+            fx = (px / 640) * canvas.width;
+            fy = (py / 360) * canvas.height;
+          } else {
+            fx = feat.x;
+            fy = feat.y;
+          }
         }
+
         if (Math.hypot(x - fx, y - fy) <= 24) {
           isNear = true;
           break;
@@ -894,31 +1340,181 @@ function hexToRgba(hex: string, alpha: number) {
               </div>
             </div>
 
-            {selectedFeature.customImage && (
-              <div className="flex items-center gap-2 p-1.5 bg-slate-950/70 rounded border border-slate-800">
-                <div className="w-8 h-8 bg-slate-900 border border-sky-500/40 rounded p-1 flex items-center justify-center shrink-0">
-                  <img
-                    src={selectedFeature.customImage}
-                    alt="Custom Symbol"
-                    className="w-full h-full object-contain"
-                  />
-                </div>
-                <div className="text-[10px] text-slate-400 font-mono">
-                  <span className="text-sky-300 font-bold block">Custom Symbol</span>
-                  <span className="uppercase text-[9px] text-slate-500">
-                    {selectedFeature.customImageType || 'SVG/JPG'} format
+            {/* PRD Section 11 PTZ-Aware Telemetry Tag Banner */}
+            <div className="bg-slate-950 p-2 rounded border border-slate-800 space-y-1 font-mono text-[9.5px]">
+              <div className="text-slate-400 font-bold uppercase tracking-wider flex items-center justify-between">
+                <span className="text-sky-400">PTZ Telemetry Tag</span>
+                <span className="text-[8.5px] px-1 rounded bg-sky-950 text-sky-300 border border-sky-500/40">
+                  SEC-11
+                </span>
+              </div>
+              <div className="text-slate-200 break-all select-all font-semibold leading-relaxed bg-slate-900/80 p-1.5 rounded border border-slate-800">
+                {selectedFeature.label.toUpperCase()} | X={Math.round(selectedFeature.x)} | Y={Math.round(selectedFeature.y)} | Pan={
+                  selectedFeature.ptzAnchor?.panDeg !== undefined
+                    ? `${selectedFeature.ptzAnchor.panDeg >= 0 ? '+' : ''}${selectedFeature.ptzAnchor.panDeg.toFixed(1)}°`
+                    : 'N/A'
+                } | Tilt={
+                  selectedFeature.ptzAnchor?.tiltDeg !== undefined
+                    ? `${selectedFeature.ptzAnchor.tiltDeg >= 0 ? '+' : ''}${selectedFeature.ptzAnchor.tiltDeg.toFixed(1)}°`
+                    : 'N/A'
+                } | Zoom={
+                  selectedFeature.ptzAnchor?.placedAtZoom !== undefined
+                    ? `${selectedFeature.ptzAnchor.placedAtZoom.toFixed(1)}×`
+                    : '1.0×'
+                } | Time={selectedFeature.timestampStr || new Date(selectedFeature.createdAt).toLocaleTimeString()}
+              </div>
+              {onSlewToObject && selectedFeature.ptzAnchor && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onSlewToObject(
+                      selectedFeature.ptzAnchor!.panDeg,
+                      selectedFeature.ptzAnchor!.tiltDeg,
+                      selectedFeature.ptzAnchor!.placedAtZoom
+                    )
+                  }
+                  className="w-full mt-1 py-1 flex items-center justify-center gap-1.5 bg-sky-950 hover:bg-sky-900 text-sky-300 border border-sky-500/50 rounded font-semibold transition"
+                >
+                  <Navigation className="w-3 h-3 text-sky-400" />
+                  <span>Slew Camera to This Target</span>
+                </button>
+              )}
+            </div>
+
+            {/* Layer & Opacity Controls */}
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">
+                  Layer
+                </label>
+                <select
+                  value={selectedFeature.layer || 'symbols'}
+                  onChange={(e) =>
+                    onUpdateFeature({
+                      ...selectedFeature,
+                      layer: e.target.value as any,
+                    })
+                  }
+                  className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono text-xs focus:outline-none focus:border-sky-500"
+                >
+                  <option value="symbols">Symbols</option>
+                  <option value="labels">Labels</option>
+                  <option value="boundary">Boundary</option>
+                </select>
+              </div>
+
+              <div>
+                <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                  <span>Opacity</span>
+                  <span className="text-sky-300 font-bold">
+                    {((selectedFeature.opacity ?? 1.0) * 100).toFixed(0)}%
                   </span>
+                </div>
+                <input
+                  type="range"
+                  min="0.2"
+                  max="1.0"
+                  step="0.05"
+                  value={selectedFeature.opacity ?? 1.0}
+                  onChange={(e) =>
+                    onUpdateFeature({
+                      ...selectedFeature,
+                      opacity: parseFloat(e.target.value),
+                    })
+                  }
+                  className="w-full accent-sky-400 h-1 bg-slate-700 rounded mt-1.5"
+                />
+              </div>
+            </div>
+
+            {/* Custom Image Flips */}
+            {selectedFeature.customImage && (
+              <div className="flex items-center justify-between p-1.5 bg-slate-950/70 rounded border border-slate-800">
+                <span className="text-[10px] text-slate-400 font-mono">Flip Orientation:</span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateFeature({
+                        ...selectedFeature,
+                        flipH: !selectedFeature.flipH,
+                      })
+                    }
+                    className={`px-2 py-0.5 rounded text-[10px] font-mono border transition ${
+                      selectedFeature.flipH
+                        ? 'bg-sky-950 text-sky-300 border-sky-500 font-bold'
+                        : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-white'
+                    }`}
+                  >
+                    Flip H
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateFeature({
+                        ...selectedFeature,
+                        flipV: !selectedFeature.flipV,
+                      })
+                    }
+                    className={`px-2 py-0.5 rounded text-[10px] font-mono border transition ${
+                      selectedFeature.flipV
+                        ? 'bg-sky-950 text-sky-300 border-sky-500 font-bold'
+                        : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-white'
+                    }`}
+                  >
+                    Flip V
+                  </button>
                 </div>
               </div>
             )}
 
+            {/* Bottom Actions: Duplicate, Lock, Delete */}
             <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
-              <span className="text-[10px] text-slate-400 font-mono">
-                Ref: X:{Math.round(selectedFeature.x)} Y:{Math.round(selectedFeature.y)}
-              </span>
+              <div className="flex items-center gap-1.5">
+                {onDuplicateFeature && (
+                  <button
+                    type="button"
+                    onClick={() => onDuplicateFeature(selectedFeature)}
+                    className="flex items-center gap-1 text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2 py-1 rounded transition text-[11px]"
+                    title="Duplicate this feature"
+                  >
+                    <Copy className="w-3 h-3 text-sky-400" />
+                    <span>Copy</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdateFeature({
+                      ...selectedFeature,
+                      locked: !selectedFeature.locked,
+                    })
+                  }
+                  className={`flex items-center gap-1 px-2 py-1 rounded transition text-[11px] border ${
+                    selectedFeature.locked
+                      ? 'bg-amber-950/80 text-amber-300 border-amber-500/60 font-bold'
+                      : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                  }`}
+                  title={selectedFeature.locked ? 'Unlock feature' : 'Lock feature from accidental edits'}
+                >
+                  {selectedFeature.locked ? (
+                    <>
+                      <Lock className="w-3 h-3 text-amber-400" />
+                      <span>Locked</span>
+                    </>
+                  ) : (
+                    <>
+                      <Unlock className="w-3 h-3" />
+                      <span>Lock</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
               <button
                 onClick={() => onDeleteFeature(selectedFeature.id)}
-                className="flex items-center gap-1 text-red-400 hover:text-red-300 hover:bg-red-950/40 px-2 py-1 rounded transition"
+                className="flex items-center gap-1 text-red-400 hover:text-red-300 hover:bg-red-950/40 border border-red-900/30 px-2 py-1 rounded transition"
               >
                 <Trash2 className="w-3 h-3" />
                 <span>Delete</span>

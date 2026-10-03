@@ -18,6 +18,7 @@ import {
 interface StatusBarProps {
   sourceType?: VideoSourceType;
   isConnected: boolean;
+  onvifConnected?: boolean;
   registrationMetrics: RegistrationMetrics;
   featureCount: number;
   boundariesCount?: number;
@@ -28,11 +29,16 @@ interface StatusBarProps {
   onToggleAllLayers?: () => void;
   onToggleFullscreen?: () => void;
   onOpenSettings: () => void;
+  ptzCoordinates?: { pan: number; tilt: number; zoom: number; moveStatus?: string };
+  scenarioName?: string;
+  isScenarioModified?: boolean;
+  registrationMode?: string;
 }
 
 export const StatusBar: React.FC<StatusBarProps> = ({
   sourceType = 'simulator',
   isConnected,
+  onvifConnected = false,
   registrationMetrics,
   featureCount,
   boundariesCount,
@@ -43,6 +49,10 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   onToggleAllLayers,
   onToggleFullscreen,
   onOpenSettings,
+  ptzCoordinates,
+  scenarioName = 'Exercise-01',
+  isScenarioModified = false,
+  registrationMode = 'PTZ + VISUAL',
 }) => {
   const { quality, inliers, totalMatches, fps, processingTimeMs } = registrationMetrics;
 
@@ -52,7 +62,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
         return (
           <span className="flex items-center gap-1 text-emerald-400 bg-emerald-950/80 border border-emerald-500/40 px-2 py-0.5 rounded font-mono font-semibold">
             <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-            <span>REGISTRATION: GOOD</span>
+            <span>HYBRID: ACTIVE (GOOD)</span>
           </span>
         );
       case 'DEGRADED':
@@ -66,7 +76,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
         return (
           <span className="flex items-center gap-1 text-red-400 bg-red-950/90 border border-red-500/50 px-2 py-0.5 rounded font-mono font-semibold animate-pulse">
             <AlertCircle className="w-3 h-3 text-red-400" />
-            <span>REGISTRATION: LOST (OVERLAYS FROZEN)</span>
+            <span>REGISTRATION: LOST</span>
           </span>
         );
       default:
@@ -78,53 +88,91 @@ export const StatusBar: React.FC<StatusBarProps> = ({
     }
   };
 
+  // Formatted executive telemetry string per PRD Section 6
+  const panStr = ptzCoordinates ? (ptzCoordinates.pan >= 0 ? `+${ptzCoordinates.pan.toFixed(1).padStart(5, '0')}°` : `${ptzCoordinates.pan.toFixed(1)}°`) : '000.0°';
+  const tiltStr = ptzCoordinates ? (ptzCoordinates.tilt >= 0 ? `+${ptzCoordinates.tilt.toFixed(1)}°` : `${ptzCoordinates.tilt.toFixed(1)}°`) : '00.0°';
+  const zoomStr = ptzCoordinates ? `${ptzCoordinates.zoom.toFixed(1)}×` : '1.0×';
+
   return (
     <div
       id="tactical-status-bar"
-      className="bg-slate-900 border-t border-slate-800 px-3 py-1.5 flex flex-wrap items-center justify-between text-xs font-mono text-slate-300 select-none z-30"
+      className="bg-slate-900 border-t border-slate-800 px-3 py-1.5 flex flex-col gap-1 text-xs font-mono text-slate-300 select-none z-30 shadow-inner"
     >
-      {/* Left items: Camera & Registration Quality */}
-      <div className="flex items-center gap-3 flex-wrap">
-        {/* Camera Status */}
-        <div className="flex items-center gap-1.5">
-          <span
-            className={`w-2 h-2 rounded-full ${
-              isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-500'
-            }`}
-          />
-          <span className="text-slate-400 text-[11px]">Camera:</span>
-          <span
-            className={`font-semibold ${
-              isConnected ? 'text-emerald-300' : 'text-red-400'
-            }`}
-          >
+      {/* PRD Section 6 Executive Status Ribbon */}
+      <div
+        id="executive-status-ribbon"
+        className="flex items-center justify-between gap-2 overflow-x-auto py-0.5 px-2 bg-slate-950/90 rounded border border-slate-800/80 text-[11px] tracking-wide"
+      >
+        <div className="flex items-center gap-1.5 text-slate-300 shrink-0">
+          <span className="text-slate-500 font-bold">Status:</span>
+          <span className={isConnected ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+            {sourceType === 'rtsp' ? 'RTSP' : sourceType === 'onvif_ffmpeg' ? 'RTSP/ONVIF' : 'VIDEO'}{' '}
             {isConnected ? 'CONNECTED' : 'DISCONNECTED'}
           </span>
-
-          {/* Active Source Badge */}
-          {sourceType === 'rear_camera' && (
-            <span className="flex items-center gap-1 text-emerald-300 bg-emerald-950/80 border border-emerald-500/40 px-1.5 py-0.5 rounded text-[10px] font-mono">
-              <Smartphone className="w-2.5 h-2.5 text-emerald-400" />
-              REAR CAM
+          <span className="text-slate-600">|</span>
+          <span className={onvifConnected ? 'text-emerald-400 font-bold' : 'text-slate-400'}>
+            ONVIF {onvifConnected ? 'CONNECTED' : 'DISCONNECTED'}
+          </span>
+          <span className="text-slate-600">|</span>
+          <span className="text-sky-300 font-bold">PAN {panStr}</span>
+          <span className="text-slate-600">|</span>
+          <span className="text-amber-300 font-bold">TILT {tiltStr}</span>
+          <span className="text-slate-600">|</span>
+          <span className="text-emerald-300 font-bold">ZOOM {zoomStr}</span>
+          <span className="text-slate-600">|</span>
+          <span className="text-sky-400 font-bold">
+            REGISTRATION {registrationMode}
+          </span>
+          <span className="text-slate-600">|</span>
+          <span className="text-amber-200 font-bold">
+            SCENARIO {scenarioName}
+          </span>
+          {isScenarioModified ? (
+            <span className="px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[9px] font-bold">
+              MODIFIED
             </span>
-          )}
-          {sourceType === 'webcam' && (
-            <span className="flex items-center gap-1 text-sky-300 bg-sky-950/80 border border-sky-500/40 px-1.5 py-0.5 rounded text-[10px] font-mono">
-              <Camera className="w-2.5 h-2.5 text-sky-400" />
-              WEBCAM
-            </span>
-          )}
-          {sourceType === 'simulator' && (
-            <span className="text-slate-400 bg-slate-800/90 border border-slate-700 px-1.5 py-0.5 rounded text-[10px] font-mono">
-              SIMULATOR
-            </span>
-          )}
-          {sourceType === 'rtsp' && (
-            <span className="text-amber-300 bg-amber-950/80 border border-amber-500/40 px-1.5 py-0.5 rounded text-[10px] font-mono">
-              RTSP
+          ) : (
+            <span className="px-1 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[9px] font-bold">
+              SAVED
             </span>
           )}
         </div>
+
+        {/* Persistent Simulation Exercise Indicator per PRD Section 36 */}
+        <div className="flex items-center gap-1.5 shrink-0 pl-2 border-l border-slate-800 text-[10px]">
+          <span className="px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-500/50 text-amber-300 font-bold animate-pulse">
+            SIMULATION / EXERCISE USE ONLY
+          </span>
+        </div>
+      </div>
+
+      {/* Secondary Bar: Live Diagnostics & Tactical Metrics */}
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+        {/* Left: Quality Badge, Inliers, and Latency */}
+        <div className="flex items-center gap-3 flex-wrap">
+          {getQualityBadge()}
+          <span className="text-slate-400">
+            Inliers: <strong className="text-slate-200">{inliers}</strong> / {minInliersThreshold}
+          </span>
+          <span className="text-slate-500 hidden sm:inline">
+            (Matches: {totalMatches})
+          </span>
+        </div>
+
+        {/* Live PTZ Telemetry Badge */}
+        {ptzCoordinates && (
+          <div className="flex items-center gap-2 bg-slate-950/80 px-2 py-0.5 rounded border border-slate-800 text-[10px] font-mono">
+            <span className="text-slate-500">PTZ:</span>
+            <span className="text-sky-300">P:{ptzCoordinates.pan.toFixed(1)}°</span>
+            <span className="text-amber-300">T:{ptzCoordinates.tilt.toFixed(1)}°</span>
+            <span className="text-emerald-300">Z:{ptzCoordinates.zoom.toFixed(2)}x</span>
+            {ptzCoordinates.moveStatus && ptzCoordinates.moveStatus !== 'IDLE' && (
+              <span className="text-[9px] px-1 bg-amber-500/20 text-amber-300 rounded border border-amber-500/30 animate-pulse">
+                {ptzCoordinates.moveStatus}
+              </span>
+            )}
+          </div>
+        )}
 
         <div className="h-3.5 w-[1px] bg-slate-800" />
 

@@ -98,7 +98,7 @@ export const DEFAULT_SCENARIOS: ScenarioData[] = [
       [1120, 420],
     ],
     registration: {
-      method: 'ORB_RANSAC_HOMOGRAPHY',
+      mode: 'PTZ_HYBRID',
       match_threshold: 0.75,
       min_inliers: 8,
     },
@@ -174,7 +174,7 @@ export const DEFAULT_SCENARIOS: ScenarioData[] = [
       [1080, 520],
     ],
     registration: {
-      method: 'ORB_RANSAC_HOMOGRAPHY',
+      mode: 'PTZ_HYBRID',
       match_threshold: 0.75,
       min_inliers: 8,
     },

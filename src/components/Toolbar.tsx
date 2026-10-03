@@ -26,7 +26,11 @@ import {
   Zap,
   Smartphone,
   Maximize,
-  Minimize,
+  Radio,
+  Target,
+  Video,
+  Image as ImageIcon,
+  Sparkles,
 } from 'lucide-react';
 import { RegistrationQuality, BoundaryConfig, VideoSourceType } from '../types';
 
@@ -59,6 +63,9 @@ interface ToolbarProps {
   onToggleAllLayers?: () => void;
   onOpenBoundaryConfig: () => void;
   onOpenAddFeature: () => void;
+  onOpenCustomImage?: () => void;
+  onOpenCustomSvg?: () => void;
+  onOpenLayersDrawer?: () => void;
   onOpenSaveScenario: () => void;
   onOpenLoadScenario: () => void;
   onSetCurrentAsReference: () => void;
@@ -73,6 +80,15 @@ interface ToolbarProps {
   onOpenSettings: () => void;
   registrationQuality: RegistrationQuality;
   hasReference: boolean;
+  onOpenOnvifPtz?: () => void;
+  onOpenPtzMemory?: () => void;
+  onOpenFfmpegHub?: () => void;
+  isOnvifOpen?: boolean;
+  isPtzMemoryOpen?: boolean;
+  ptzPan?: number;
+  ptzTilt?: number;
+  ptzZoom?: number;
+  onvifConnected?: boolean;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
@@ -104,6 +120,9 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onToggleAllLayers,
   onOpenBoundaryConfig,
   onOpenAddFeature,
+  onOpenCustomImage,
+  onOpenCustomSvg,
+  onOpenLayersDrawer,
   onOpenSaveScenario,
   onOpenLoadScenario,
   onSetCurrentAsReference,
@@ -118,6 +137,15 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onOpenSettings,
   registrationQuality,
   hasReference,
+  onOpenOnvifPtz,
+  onOpenPtzMemory,
+  onOpenFfmpegHub,
+  isOnvifOpen = false,
+  isPtzMemoryOpen = false,
+  ptzPan,
+  ptzTilt,
+  ptzZoom,
+  onvifConnected = false,
 }) => {
   const [confirmClear, setConfirmClear] = useState(false);
 
@@ -179,6 +207,9 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               </option>
               <option value="rtsp" className="bg-slate-900 text-slate-200">
                 RTSP IP Camera Stream
+              </option>
+              <option value="onvif_ffmpeg" className="bg-slate-900 text-sky-400 font-bold">
+                ONVIF / FFmpeg Stream Pipeline
               </option>
             </select>
           </div>
@@ -285,9 +316,33 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         )}
       </div>
 
-      {/* Exercise Overlay Action Tools */}
+      {/* Exercise Overlay Action Tools matching PRD Section 6 Main UI */}
       <div className="flex items-center gap-1.5 flex-wrap">
-        {/* Add Feature Button */}
+        {/* PTZ Status Quick Button (PRD Section 6 & 9) */}
+        {onOpenOnvifPtz && (
+          <button
+            id="btn-toolbar-ptz-status"
+            onClick={onOpenOnvifPtz}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded transition border font-mono text-[11px] ${
+              onvifConnected
+                ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300 font-bold shadow-sm'
+                : isOnvifOpen
+                ? 'bg-sky-950 border-sky-500 text-sky-300 font-bold'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700 hover:text-white'
+            }`}
+            title="PTZ Status & Telemetry Panel (Pan, Tilt, Zoom, Speed Dome)"
+          >
+            <Radio className="w-3.5 h-3.5 text-emerald-400" />
+            <span>PTZ Status</span>
+            {ptzPan !== undefined && (
+              <span className="text-[10px] text-sky-300 font-semibold hidden md:inline">
+                {ptzPan >= 0 ? `+${ptzPan.toFixed(1)}°` : `${ptzPan.toFixed(1)}°`}
+              </span>
+            )}
+          </button>
+        )}
+
+        {/* [Add Feature] Button (PRD Section 6 & 17) */}
         <button
           id="btn-add-feature"
           onClick={onOpenAddFeature}
@@ -298,7 +353,33 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           <span>Add Feature</span>
         </button>
 
-        {/* Boundaries Tool (Entry point for boundary management & drawing) */}
+        {/* [Custom Image] Button (PRD Section 6 & 18) */}
+        {onOpenCustomImage && (
+          <button
+            id="btn-toolbar-custom-image"
+            onClick={onOpenCustomImage}
+            className="flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 px-2.5 py-1.5 rounded font-medium transition"
+            title="Import and place custom JPG / PNG exercise image"
+          >
+            <ImageIcon className="w-3.5 h-3.5" />
+            <span>Custom Image</span>
+          </button>
+        )}
+
+        {/* [SVG Symbol] Button (PRD Section 6 & 19) */}
+        {onOpenCustomSvg && (
+          <button
+            id="btn-toolbar-custom-svg"
+            onClick={onOpenCustomSvg}
+            className="flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 px-2.5 py-1.5 rounded font-medium transition"
+            title="Import and place scalable vector SVG exercise symbol"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>SVG Symbol</span>
+          </button>
+        )}
+
+        {/* [Boundary] Button & In-Progress Drawing Controller (PRD Section 6 & 16) */}
         <div className="flex items-center gap-1">
           {isDrawingBoundary ? (
             <div className="flex items-center gap-1 bg-amber-950/80 border border-amber-500/60 rounded px-1.5 py-0.5 shadow-sm">
@@ -341,12 +422,11 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             </div>
           ) : null}
 
-          {/* Boundaries Button: Opens Boundaries Tab & Drawer with Drawing Controls */}
           <button
             id="btn-boundary-config"
             onClick={onOpenBoundaryConfig}
             className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-2.5 py-1.5 rounded font-medium transition"
-            title="Manage boundaries, customize colors, and draw exercise boundaries"
+            title="Manage and draw exercise boundaries"
           >
             {boundaryConfig?.color ? (
               <span
@@ -356,16 +436,39 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             ) : (
               <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
             )}
-            <span className="font-mono text-[11px]">Boundaries</span>
+            <span className="font-mono text-[11px]">Boundary</span>
             {boundariesCount !== undefined && boundariesCount > 0 && (
               <span className="bg-slate-700 text-sky-300 font-mono text-[10px] px-1.5 py-0.2 rounded font-bold">
                 {boundariesCount}
               </span>
             )}
           </button>
+        </div>
 
-          {/* Master Layer Visibility: Hide/Unhide All Tactical Layers at Once */}
-          {onToggleAllLayers && (
+        {/* [Re-Reference] Button (PRD Section 6 & 14) */}
+        <button
+          id="btn-re-reference"
+          onClick={onSetCurrentAsReference}
+          className="flex items-center gap-1.5 bg-slate-800 hover:bg-sky-950 text-slate-200 hover:text-sky-300 border border-slate-700 hover:border-sky-600 px-2.5 py-1.5 rounded transition"
+          title="Set Current Camera View as Reference Frame"
+        >
+          <Anchor className="w-3.5 h-3.5 text-sky-400" />
+          <span>Re-reference</span>
+        </button>
+
+        {/* [Layers] Button (PRD Section 6 & 21) */}
+        {onOpenLayersDrawer ? (
+          <button
+            id="btn-toolbar-layers-drawer"
+            onClick={onOpenLayersDrawer}
+            className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-2.5 py-1.5 rounded font-medium transition"
+            title="Manage Exercise Layers (Base Video, Boundary, Symbols, Labels, Status)"
+          >
+            <Layers className="w-3.5 h-3.5 text-sky-400" />
+            <span>Layers</span>
+          </button>
+        ) : (
+          onToggleAllLayers && (
             <button
               id="btn-toggle-all-layers"
               onClick={onToggleAllLayers}
@@ -374,91 +477,20 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                   ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
                   : 'bg-amber-950/80 hover:bg-amber-900/90 text-amber-300 border-amber-500/50 shadow-sm'
               }`}
-              title={
-                allLayersVisible
-                  ? 'Hide all tactical overlay layers at once (features, boundaries, reticle)'
-                  : 'Unhide all tactical overlay layers'
-              }
+              title="Toggle all tactical overlay layers at once"
             >
-              {allLayersVisible ? (
-                <>
-                  <Eye className="w-3.5 h-3.5 text-sky-400" />
-                  <span className="hidden sm:inline">Layers:</span>
-                  <span className="text-emerald-400 font-bold">ON</span>
-                </>
-              ) : (
-                <>
-                  <EyeOff className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="hidden sm:inline">Layers:</span>
-                  <span className="text-amber-400 font-bold">HIDDEN</span>
-                </>
-              )}
+              <Eye className="w-3.5 h-3.5 text-sky-400" />
+              <span>Layers</span>
             </button>
-          )}
-        </div>
-
-        {/* Clear All - Safe two-step tactile confirmation (works 100% in sandboxed iframes) */}
-        {!confirmClear ? (
-          <button
-            id="btn-clear-all"
-            onClick={() => setConfirmClear(true)}
-            className="flex items-center gap-1 text-slate-400 hover:text-rose-400 hover:bg-slate-800 px-2 py-1.5 rounded transition"
-            title="Clear all placed features and boundaries"
-          >
-            <Trash className="w-3.5 h-3.5" />
-            <span>Clear All</span>
-          </button>
-        ) : (
-          <button
-            id="btn-clear-all-confirm"
-            onClick={() => {
-              onClearAll();
-              setConfirmClear(false);
-            }}
-            className="flex items-center gap-1 bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold px-2.5 py-1.5 rounded transition shadow text-[11px] animate-pulse"
-            title="Click again to confirm clearing all features and boundaries"
-          >
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />
-            <span>Confirm Clear?</span>
-          </button>
+          )
         )}
 
-        <div className="h-4 w-[1px] bg-slate-800 mx-1" />
-
-        {/* Re-Reference (Section 17) */}
-        <button
-          id="btn-re-reference"
-          onClick={onSetCurrentAsReference}
-          className="flex items-center gap-1.5 bg-slate-800 hover:bg-sky-950 text-slate-200 hover:text-sky-300 border border-slate-700 hover:border-sky-600 px-2.5 py-1.5 rounded transition"
-          title="Set Current Camera View as Reference Frame"
-        >
-          <Anchor className="w-3.5 h-3.5 text-sky-400" />
-          <span>Re-Reference</span>
-        </button>
-
-        {/* Visual Registration Toggle */}
-        <button
-          id="btn-toggle-visual-reg"
-          onClick={onToggleVisualReg}
-          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded font-mono font-medium transition border ${
-            visualRegEnabled
-              ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-400 hover:bg-emerald-900/60'
-              : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
-          }`}
-          title="Toggle CV Homography Tracking Engine"
-        >
-          <Activity className="w-3.5 h-3.5" />
-          <span>Visual Reg: {visualRegEnabled ? 'ON' : 'OFF'}</span>
-        </button>
-
-        <div className="h-4 w-[1px] bg-slate-800 mx-1" />
-
-        {/* Scenario Save & Load (PRD Section 23 & 26) */}
+        {/* [Save] & [Load] Buttons (PRD Section 6, 22, 23) */}
         <button
           id="btn-save-scenario"
           onClick={onOpenSaveScenario}
           className="flex items-center gap-1 text-slate-300 hover:text-white hover:bg-slate-800 px-2 py-1.5 rounded transition"
-          title="Save scenario JSON and reference frame"
+          title="Save complete scenario with packaged assets"
         >
           <Save className="w-3.5 h-3.5 text-sky-400" />
           <span>Save</span>
@@ -474,6 +506,51 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           <span>Load</span>
         </button>
 
+        <div className="h-4 w-[1px] bg-slate-800 mx-1" />
+
+        {/* Clear All - Safe two-step confirmation */}
+        {!confirmClear ? (
+          <button
+            id="btn-clear-all"
+            onClick={() => setConfirmClear(true)}
+            className="flex items-center gap-1 text-slate-400 hover:text-rose-400 hover:bg-slate-800 px-2 py-1.5 rounded transition"
+            title="Clear all placed features and boundaries"
+          >
+            <Trash className="w-3.5 h-3.5" />
+            <span>Clear</span>
+          </button>
+        ) : (
+          <button
+            id="btn-clear-all-confirm"
+            onClick={() => {
+              onClearAll();
+              setConfirmClear(false);
+            }}
+            className="flex items-center gap-1 bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold px-2 py-1.5 rounded transition shadow text-[11px] animate-pulse"
+            title="Confirm clearing all features and boundaries"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />
+            <span>Confirm?</span>
+          </button>
+        )}
+
+        {/* PTZ Spatial Memory Registry */}
+        {onOpenPtzMemory && (
+          <button
+            id="btn-toolbar-ptz-memory"
+            onClick={onOpenPtzMemory}
+            className={`flex items-center gap-1 px-2 py-1.5 rounded transition border font-mono text-[11px] ${
+              isPtzMemoryOpen
+                ? 'bg-sky-950 border-sky-500 text-sky-300 font-bold shadow-sm'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700 hover:text-white'
+            }`}
+            title="PTZ Spatial Memory Radar Registry"
+          >
+            <Target className="w-3.5 h-3.5 text-sky-400" />
+            <span className="hidden xl:inline">Memory</span>
+          </button>
+        )}
+
         {/* Simulator Pan/Tilt Controls Toggle */}
         {sourceType === 'simulator' && (
           <button
@@ -487,11 +564,11 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             title="Toggle Simulator Camera Pan / Tilt / Zoom Controls"
           >
             <Sliders className="w-3.5 h-3.5" />
-            <span>Camera PTZ</span>
+            <span>Sim PTZ</span>
           </button>
         )}
 
-        {/* Diagnostics Toggle */}
+        {/* Diagnostics Inspector */}
         <button
           id="btn-toggle-diagnostics"
           onClick={onToggleDiagnostics}
@@ -502,21 +579,21 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           }`}
           title="Toggle Visual Registration Diagnostics Inspector"
         >
-          <Eye className="w-3.5 h-3.5" />
-          <span>Inspector</span>
+          <Activity className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">Inspector</span>
         </button>
 
-        {/* Settings Button */}
+        {/* [Settings] Button (PRD Section 6) */}
         <button
           id="btn-open-settings"
           onClick={onOpenSettings}
-          className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition"
-          title="Settings (Camera, Registration, Overlay, Parallax notice)"
+          className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition border border-transparent hover:border-slate-700"
+          title="Settings (Camera, Calibration, Registration, Overlays)"
         >
-          <Settings className="w-4 h-4" />
+          <Settings className="w-4 h-4 text-slate-300" />
         </button>
 
-        {/* Maximize / Fullscreen Screen Preview Toggle */}
+        {/* [Maximize] Button (PRD Section 6 & 7) */}
         {onToggleFullscreen && (
           <button
             id="btn-toolbar-toggle-fullscreen"
@@ -528,17 +605,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             }`}
             title={isFullscreen ? 'Exit full screen (Esc)' : 'Maximize screen / Fullscreen preview'}
           >
-            {isFullscreen ? (
-              <>
-                <Minimize className="w-3.5 h-3.5 text-sky-400" />
-                <span className="hidden sm:inline">Exit Full</span>
-              </>
-            ) : (
-              <>
-                <Maximize className="w-3.5 h-3.5 text-sky-400" />
-                <span className="hidden sm:inline">Maximize</span>
-              </>
-            )}
+            <Maximize className="w-3.5 h-3.5 text-sky-400" />
+            <span>{isFullscreen ? 'Exit' : 'Maximize'}</span>
           </button>
         )}
       </div>

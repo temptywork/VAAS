@@ -22,6 +22,7 @@ interface ScenarioModalProps {
   onLoadScenario: (scenario: ScenarioData) => void;
   savedScenarios: ScenarioData[];
   onDeleteSavedScenario: (index: number) => void;
+  isModified?: boolean;
 }
 
 export const ScenarioModal: React.FC<ScenarioModalProps> = ({
@@ -33,10 +34,12 @@ export const ScenarioModal: React.FC<ScenarioModalProps> = ({
   onLoadScenario,
   savedScenarios,
   onDeleteSavedScenario,
+  isModified = false,
 }) => {
   const [nameInput, setNameInput] = useState(currentScenarioName || 'Exercise Iron Spear - OP 2');
   const [descInput, setDescInput] = useState('');
   const [activeTab, setActiveTab] = useState<'presets' | 'saved'>('presets');
+  const [pendingLoadScenario, setPendingLoadScenario] = useState<ScenarioData | null>(null);
 
   if (!isOpen) return null;
 
@@ -44,6 +47,23 @@ export const ScenarioModal: React.FC<ScenarioModalProps> = ({
     if (!nameInput.trim()) return;
     onSaveScenario(nameInput.trim(), descInput.trim());
     onClose();
+  };
+
+  const handleRequestLoad = (scenario: ScenarioData) => {
+    if (isModified) {
+      setPendingLoadScenario(scenario);
+    } else {
+      onLoadScenario(scenario);
+      onClose();
+    }
+  };
+
+  const handleConfirmOverwrite = () => {
+    if (pendingLoadScenario) {
+      onLoadScenario(pendingLoadScenario);
+      setPendingLoadScenario(null);
+      onClose();
+    }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -54,8 +74,7 @@ export const ScenarioModal: React.FC<ScenarioModalProps> = ({
       try {
         const parsed = JSON.parse(event.target?.result as string) as ScenarioData;
         if (parsed && parsed.features) {
-          onLoadScenario(parsed);
-          onClose();
+          handleRequestLoad(parsed);
         } else {
           alert('Invalid scenario file format.');
         }
@@ -212,10 +231,7 @@ export const ScenarioModal: React.FC<ScenarioModalProps> = ({
 
                       <div className="flex items-center gap-1.5 shrink-0">
                         <button
-                          onClick={() => {
-                            onLoadScenario(scen);
-                            onClose();
-                          }}
+                          onClick={() => handleRequestLoad(scen)}
                           className="flex items-center gap-1 bg-sky-700 hover:bg-sky-600 text-white font-medium px-2.5 py-1.5 rounded transition"
                         >
                           <Check className="w-3 h-3" />
@@ -233,6 +249,34 @@ export const ScenarioModal: React.FC<ScenarioModalProps> = ({
                       </div>
                     </div>
                   )
+                )}
+
+                {/* Overwrite Confirmation Banner if scenario was modified */}
+                {pendingLoadScenario && (
+                  <div className="bg-amber-950/90 border border-amber-500 rounded-lg p-3 space-y-2 mt-2 shadow-lg animate-pulse">
+                    <div className="flex items-center gap-2 text-amber-300 font-bold text-xs">
+                      <span>⚠ Unsaved Scenario Warning</span>
+                    </div>
+                    <p className="text-[11px] text-amber-200">
+                      Current exercise has unsaved modifications. Loading "{pendingLoadScenario.scenario_name}" will replace all placed symbols and boundaries.
+                    </p>
+                    <div className="flex items-center justify-end gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setPendingLoadScenario(null)}
+                        className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
+                      >
+                        Keep Current
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleConfirmOverwrite}
+                        className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-slate-950 font-bold text-xs"
+                      >
+                        Confirm Overwrite &amp; Load
+                      </button>
+                    </div>
+                  </div>
                 )}
 
                 {activeTab === 'saved' && savedScenarios.length === 0 && (

@@ -72,28 +72,58 @@ export const DiagnosticsDrawer: React.FC<DiagnosticsDrawerProps> = ({
 
         {/* Feature & Inlier Pipeline Breakdown (PRD Sec 12 & 45) */}
         <div>
-          <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1.5 flex justify-between">
+          <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1.5 flex justify-between tabular-nums">
             <span>Feature Pipeline</span>
             <span className="text-slate-300">
               Proc: {metrics.processingTimeMs.toFixed(1)}ms
             </span>
           </div>
 
-          <div className="bg-slate-950/60 rounded-lg border border-slate-800 p-2.5 space-y-1.5 text-[11px]">
+          <div className="bg-slate-950/60 rounded-lg border border-slate-800 p-2.5 space-y-1.5 text-[11px] tabular-nums">
             <div className="flex justify-between">
-              <span className="text-slate-400">Ref Keypoints:</span>
-              <span className="text-slate-200">{metrics.candidateKeypointsRef}</span>
+              <span className="text-slate-400">Active Solver Mode:</span>
+              <span className="text-sky-300 font-semibold">
+                {metrics.activeMotionModel || settings.motionModel || 'HYBRID'}
+              </span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-slate-400">Anchor Reference:</span>
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={
+                    (metrics.keyframeCount || 0) > 0
+                      ? 'text-amber-300 font-semibold'
+                      : 'text-emerald-300 font-semibold'
+                  }
+                >
+                  {(metrics.keyframeCount || 0) > 0
+                    ? `CHAINED KF #${metrics.keyframeCount}`
+                    : 'ROOT ANCHOR (F₀)'}
+                </span>
+                {(metrics.keyframeCount || 0) > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => engine.clearKeyframeChain()}
+                    className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
+                    title="Clear intermediate keyframes and relock to root reference"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">Current Keypoints:</span>
-              <span className="text-slate-200">{metrics.candidateKeypointsCur}</span>
+              <span className="text-slate-400">Ref / Cur Keypoints:</span>
+              <span className="text-slate-200">
+                {metrics.candidateKeypointsRef} / {metrics.candidateKeypointsCur}
+              </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">Lowe's Ratio Matches:</span>
+              <span className="text-slate-400">Oriented ORB Matches:</span>
               <span className="text-amber-400">{metrics.totalMatches}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">RANSAC Inliers:</span>
+              <span className="text-slate-400">MSAC Consensus Inliers:</span>
               <span className="text-emerald-400 font-bold">
                 {metrics.inliers} (Req: ≥ {settings.minInliers})
               </span>
@@ -116,7 +146,7 @@ export const DiagnosticsDrawer: React.FC<DiagnosticsDrawerProps> = ({
           <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1.5">
             Homography Matrix H (3×3)
           </div>
-          <div className="bg-slate-950/80 rounded-lg border border-slate-800 p-2 text-[10px] font-mono grid grid-cols-3 gap-1 text-center">
+          <div className="bg-slate-950/80 rounded-lg border border-slate-800 p-2 text-[10px] font-mono tabular-nums grid grid-cols-3 gap-1 text-center">
             <span className="text-sky-300 bg-slate-900 py-1 rounded">
               {H[0].toFixed(3)}
             </span>
@@ -154,7 +184,7 @@ export const DiagnosticsDrawer: React.FC<DiagnosticsDrawerProps> = ({
           <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1.5">
             Estimated Camera Movement
           </div>
-          <div className="bg-slate-950/60 rounded-lg border border-slate-800 p-2 space-y-1 text-[10px]">
+          <div className="bg-slate-950/60 rounded-lg border border-slate-800 p-2 space-y-1 text-[10px] tabular-nums">
             <div className="flex justify-between">
               <span className="text-slate-400">Translation ΔX, ΔY:</span>
               <span className="text-sky-300">
@@ -172,6 +202,12 @@ export const DiagnosticsDrawer: React.FC<DiagnosticsDrawerProps> = ({
               <span className="text-slate-400">Estimated Roll / Tilt:</span>
               <span className="text-amber-300">
                 {metrics.rotationEstimateDeg.toFixed(1)}°
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Corner Velocity:</span>
+              <span className="text-slate-200">
+                {(metrics.cornerVelocityPx ?? 0).toFixed(2)} px/frame
               </span>
             </div>
           </div>

@@ -73,6 +73,24 @@ export const FEATURE_LIBRARY: Record<FeatureType, FeatureDefinition> = {
     description: 'Exercise command & tactical operations center',
     color: '#a855f7', // Purple
   },
+  generic_marker: {
+    type: 'generic_marker',
+    name: 'Generic Marker',
+    symbol: '⊕',
+    shape: 'marker',
+    defaultLabel: 'SIM MARKER 01',
+    description: 'General purpose tactical exercise waypoint / target pin',
+    color: '#38bdf8', // Sky
+  },
+  text_label: {
+    type: 'text_label',
+    name: 'Text Label',
+    symbol: '🗎',
+    shape: 'text',
+    defaultLabel: 'SIMULATED SECTOR',
+    description: 'Standalone tactical annotation & coordinate text banner',
+    color: '#f8fafc', // Bright White
+  },
   custom: {
     type: 'custom',
     name: 'Custom Symbol (SVG/JPG)',

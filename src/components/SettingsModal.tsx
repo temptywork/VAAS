@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { CameraConfig, OverlaySettings, RegistrationSettings, VideoSourceType } from '../types';
+import { CameraCalibration, CameraConfig, OverlaySettings, PtzTolerances, RegistrationSettings, VideoSourceType } from '../types';
+import { DEFAULT_CAMERA_CALIBRATIONS } from '../data/cameraCalibrations';
 import {
   Settings,
   ShieldAlert,
@@ -13,6 +14,9 @@ import {
   Smartphone,
   RotateCw,
   Zap,
+  Compass,
+  Sliders,
+  Target,
 } from 'lucide-react';
 
 interface SettingsModalProps {
@@ -35,6 +39,10 @@ interface SettingsModalProps {
   isTorchOn?: boolean;
   hasTorchSupport?: boolean;
   onToggleTorch?: () => void;
+  cameraCalibration?: CameraCalibration;
+  onUpdateCameraCalibration?: (calib: CameraCalibration) => void;
+  ptzTolerances?: PtzTolerances;
+  onUpdatePtzTolerances?: (tol: PtzTolerances) => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -57,8 +65,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   isTorchOn = false,
   hasTorchSupport = false,
   onToggleTorch,
+  cameraCalibration = DEFAULT_CAMERA_CALIBRATIONS[0],
+  onUpdateCameraCalibration,
+  ptzTolerances = {
+    panToleranceDeg: 3.5,
+    tiltToleranceDeg: 2.0,
+    zoomTolerance: 1.5,
+    visualThreshold: 8,
+    telemetryTimeoutMs: 2500,
+  },
+  onUpdatePtzTolerances,
 }) => {
-  const [activeSection, setActiveSection] = useState<'camera' | 'reg' | 'overlay' | 'limitations'>('reg');
+  const [activeSection, setActiveSection] = useState<'reg' | 'calib' | 'tolerances' | 'overlay' | 'camera' | 'limitations'>('reg');
 
   if (!isOpen) return null;
 
@@ -88,49 +106,71 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Section Tabs */}
-        <div className="flex border-b border-slate-800 bg-slate-950/40 text-xs">
+        <div className="flex border-b border-slate-800 bg-slate-950/40 text-[11px] overflow-x-auto">
           <button
             onClick={() => setActiveSection('reg')}
-            className={`flex-1 py-2.5 px-3 flex items-center justify-center gap-1.5 font-mono border-b-2 transition ${
+            className={`flex-1 min-w-[95px] py-2 px-2 flex items-center justify-center gap-1 font-mono border-b-2 transition ${
               activeSection === 'reg'
                 ? 'border-sky-500 text-sky-400 bg-slate-900/80 font-semibold'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Activity className="w-3.5 h-3.5" />
+            <Activity className="w-3 h-3" />
             <span>Registration</span>
           </button>
           <button
+            onClick={() => setActiveSection('calib')}
+            className={`flex-1 min-w-[95px] py-2 px-2 flex items-center justify-center gap-1 font-mono border-b-2 transition ${
+              activeSection === 'calib'
+                ? 'border-sky-500 text-sky-400 bg-slate-900/80 font-semibold'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Compass className="w-3 h-3" />
+            <span>Calibration</span>
+          </button>
+          <button
+            onClick={() => setActiveSection('tolerances')}
+            className={`flex-1 min-w-[95px] py-2 px-2 flex items-center justify-center gap-1 font-mono border-b-2 transition ${
+              activeSection === 'tolerances'
+                ? 'border-sky-500 text-sky-400 bg-slate-900/80 font-semibold'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Sliders className="w-3 h-3" />
+            <span>Tolerances</span>
+          </button>
+          <button
             onClick={() => setActiveSection('overlay')}
-            className={`flex-1 py-2.5 px-3 flex items-center justify-center gap-1.5 font-mono border-b-2 transition ${
+            className={`flex-1 min-w-[95px] py-2 px-2 flex items-center justify-center gap-1 font-mono border-b-2 transition ${
               activeSection === 'overlay'
                 ? 'border-sky-500 text-sky-400 bg-slate-900/80 font-semibold'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Layers className="w-3.5 h-3.5" />
+            <Layers className="w-3 h-3" />
             <span>Overlays</span>
           </button>
           <button
             onClick={() => setActiveSection('camera')}
-            className={`flex-1 py-2.5 px-3 flex items-center justify-center gap-1.5 font-mono border-b-2 transition ${
+            className={`flex-1 min-w-[95px] py-2 px-2 flex items-center justify-center gap-1 font-mono border-b-2 transition ${
               activeSection === 'camera'
                 ? 'border-sky-500 text-sky-400 bg-slate-900/80 font-semibold'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Camera className="w-3.5 h-3.5" />
-            <span>Camera RTSP</span>
+            <Camera className="w-3 h-3" />
+            <span>RTSP Cam</span>
           </button>
           <button
             onClick={() => setActiveSection('limitations')}
-            className={`flex-1 py-2.5 px-3 flex items-center justify-center gap-1.5 font-mono border-b-2 transition ${
+            className={`flex-1 min-w-[95px] py-2 px-2 flex items-center justify-center gap-1 font-mono border-b-2 transition ${
               activeSection === 'limitations'
                 ? 'border-amber-500 text-amber-400 bg-slate-900/80 font-semibold'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
-            <ShieldAlert className="w-3.5 h-3.5" />
+            <ShieldAlert className="w-3 h-3" />
             <span>Limitations</span>
           </button>
         </div>
@@ -146,7 +186,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     Enable Visual Registration Engine
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    ORB + BFMatcher + RANSAC Homography reprojection
+                    Oriented ORB + Hartley DLT + MSAC + Huber IRLS Homography
                   </div>
                 </div>
                 <input
@@ -162,9 +202,74 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 />
               </div>
 
+              {/* User-Selectable Geometric Motion Model */}
+              <div className="bg-slate-950/60 p-3 rounded-lg border border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-slate-200 text-xs">
+                    Geometric Motion Model (Solver DOF)
+                  </span>
+                  <span className="font-mono text-[10px] text-sky-400 tabular-nums">
+                    {regSettings.motionModel || 'HYBRID'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-900 rounded-lg border border-slate-800">
+                  {(
+                    [
+                      {
+                        id: 'HYBRID',
+                        label: 'Hybrid Adaptive',
+                        sub: 'Auto 4/6/8-DOF promotion',
+                      },
+                      {
+                        id: 'PROJECTIVE_8DOF',
+                        label: '8-DOF Projective',
+                        sub: 'Hartley DLT + 3D perspective',
+                      },
+                      {
+                        id: 'AFFINE_6DOF',
+                        label: '6-DOF Affine',
+                        sub: 'Shear & tilt without warp',
+                      },
+                      {
+                        id: 'SIMILARITY_4DOF',
+                        label: '4-DOF Similarity',
+                        sub: 'Rigid Pan / Zoom / Roll',
+                      },
+                    ] as const
+                  ).map((mode) => {
+                    const isSelected = (regSettings.motionModel || 'HYBRID') === mode.id;
+                    return (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        onClick={() =>
+                          onUpdateRegSettings({
+                            ...regSettings,
+                            motionModel: mode.id,
+                          })
+                        }
+                        className={`text-left px-2.5 py-2 rounded-md transition border ${
+                          isSelected
+                            ? 'bg-sky-950/70 border-sky-500/60 text-sky-200 shadow-sm'
+                            : 'bg-slate-950/40 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                        }`}
+                      >
+                        <div className="font-mono font-semibold text-[11px] whitespace-nowrap">
+                          {mode.label}
+                        </div>
+                        <div className="text-[10px] text-slate-400 truncate mt-0.5">
+                          {mode.sub}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div className="space-y-3 bg-slate-950/40 p-3 rounded-lg border border-slate-800/80">
                 <div>
-                  <div className="flex justify-between text-[11px] font-mono mb-1">
+                  <div className="flex justify-between text-[11px] font-mono tabular-nums mb-1">
                     <span className="text-slate-400">Feature Count (Max Features)</span>
                     <span className="text-sky-400 font-bold">{regSettings.maxFeatures}</span>
                   </div>
@@ -183,12 +288,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
                   />
                   <span className="text-[10px] text-slate-500 block mt-0.5">
-                    Controls number of FAST/ORB keypoints extracted across spatial bins.
+                    Controls number of FAST/ORB keypoints extracted across 16×12 spatial bins.
                   </span>
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-[11px] font-mono mb-1">
+                  <div className="flex justify-between text-[11px] font-mono tabular-nums mb-1">
                     <span className="text-slate-400">Lowe's Ratio Test Threshold</span>
                     <span className="text-sky-400 font-bold">
                       {regSettings.matchRatioThreshold.toFixed(2)}
@@ -209,13 +314,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
                   />
                   <span className="text-[10px] text-slate-500 block mt-0.5">
-                    Ratio test distance(best) &lt; ratio × distance(second_best). Initial 0.70–0.75.
+                    Ratio test distance(best) &lt; ratio × distance(second_best) + circular orientation filter.
                   </span>
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-[11px] font-mono mb-1">
-                    <span className="text-slate-400">RANSAC Reprojection Distance Threshold</span>
+                  <div className="flex justify-between text-[11px] font-mono tabular-nums mb-1">
+                    <span className="text-slate-400">MSAC / RANSAC Reprojection Threshold</span>
                     <span className="text-sky-400 font-bold">
                       {regSettings.ransacThresholdPx.toFixed(1)} px
                     </span>
@@ -237,7 +342,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-[11px] font-mono mb-1">
+                  <div className="flex justify-between text-[11px] font-mono tabular-nums mb-1">
                     <span className="text-slate-400">Minimum Inlier Requirement</span>
                     <span className="text-sky-400 font-bold">{regSettings.minInliers} inliers</span>
                   </div>
@@ -261,8 +366,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-[11px] font-mono mb-1">
-                    <span className="text-slate-400">RANSAC Iteration Trials</span>
+                  <div className="flex justify-between text-[11px] font-mono tabular-nums mb-1">
+                    <span className="text-slate-400">MSAC Iteration Trials</span>
                     <span className="text-emerald-400 font-bold">{regSettings.ransacIterations ?? 160} cycles</span>
                   </div>
                   <input
@@ -279,13 +384,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     }
                     className="w-full accent-emerald-400 h-1.5 bg-slate-800 rounded"
                   />
-                  <span className="text-[10px] text-slate-500 block mt-0.5">
-                    More iterations increase probability of discovering maximal inlier consensus under rapid motion or occlusion.
-                  </span>
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-[11px] font-mono mb-1">
+                  <div className="flex justify-between text-[11px] font-mono tabular-nums mb-1">
                     <span className="text-slate-400">Temporal Smoothing Responsiveness (α)</span>
                     <span className="text-emerald-400 font-bold">{((regSettings.smoothingFactor ?? 0.65) * 100).toFixed(0)}%</span>
                   </div>
@@ -304,16 +406,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     className="w-full accent-emerald-400 h-1.5 bg-slate-800 rounded"
                   />
                   <span className="text-[10px] text-slate-500 block mt-0.5">
-                    Lower values (30–50%) filter jitter and micro-shakes; higher values (70–90%) give ultra-fast camera reaction.
+                    Base responsiveness gain for the adaptive 4-corner velocity stabilizer.
                   </span>
                 </div>
 
-                <div className="pt-2 border-t border-slate-800/80">
+                {/* Algorithmic Pipeline Toggles */}
+                <div className="pt-2 border-t border-slate-800/80 space-y-2.5">
                   <label className="flex items-center justify-between text-[11px] cursor-pointer">
                     <div>
-                      <span className="text-slate-300 font-medium block">All-Inlier Least Squares Matrix Refinement</span>
+                      <span className="text-slate-200 font-medium block">
+                        Hartley-Normalized DLT + Huber IRLS Refinement
+                      </span>
                       <span className="text-[10px] text-slate-500 block">
-                        Solves an overdetermined 8x8 normal system over all consensus inliers to eliminate single-quadrilateral warp jitter.
+                        Centers &amp; scales coordinates to √2 and runs 3-step Huber IRLS over all consensus inliers.
                       </span>
                     </div>
                     <input
@@ -328,14 +433,80 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       className="w-4 h-4 accent-emerald-500 rounded"
                     />
                   </label>
+
+                  <label className="flex items-center justify-between text-[11px] cursor-pointer">
+                    <div>
+                      <span className="text-slate-200 font-medium block">
+                        Oriented ORB Descriptors (Rotation Invariance)
+                      </span>
+                      <span className="text-[10px] text-slate-500 block">
+                        Steers 128-bit BRIEF sampling by patch intensity centroid angle θ = atan2(m01, m10).
+                      </span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={regSettings.orientedOrbDescriptors !== false}
+                      onChange={(e) =>
+                        onUpdateRegSettings({
+                          ...regSettings,
+                          orientedOrbDescriptors: e.target.checked,
+                        })
+                      }
+                      className="w-4 h-4 accent-emerald-500 rounded"
+                    />
+                  </label>
+
+                  <label className="flex items-center justify-between text-[11px] cursor-pointer">
+                    <div>
+                      <span className="text-slate-200 font-medium block">
+                        Automatic Keyframe Chaining (Wide Camera Panning)
+                      </span>
+                      <span className="text-[10px] text-slate-500 block">
+                        Spawns intermediate keyframes during wide pans and relocks to root reference on return.
+                      </span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={regSettings.enableKeyframeChaining !== false}
+                      onChange={(e) =>
+                        onUpdateRegSettings({
+                          ...regSettings,
+                          enableKeyframeChaining: e.target.checked,
+                        })
+                      }
+                      className="w-4 h-4 accent-emerald-500 rounded"
+                    />
+                  </label>
+
+                  <label className="flex items-center justify-between text-[11px] cursor-pointer">
+                    <div>
+                      <span className="text-slate-200 font-medium block">
+                        Adaptive 4-Corner Velocity Stabilization
+                      </span>
+                      <span className="text-[10px] text-slate-500 block">
+                        Filters canonical viewport corners in screen space with deadband damping to stop stationary jitter.
+                      </span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={regSettings.adaptiveCornerFiltering !== false}
+                      onChange={(e) =>
+                        onUpdateRegSettings({
+                          ...regSettings,
+                          adaptiveCornerFiltering: e.target.checked,
+                        })
+                      }
+                      className="w-4 h-4 accent-emerald-500 rounded"
+                    />
+                  </label>
                 </div>
               </div>
 
               <div className="flex items-center justify-between bg-slate-950/60 p-3 rounded-lg border border-slate-800">
                 <div>
-                  <div className="font-semibold text-slate-200">Re-Reference Engine</div>
+                  <div className="font-semibold text-slate-200">Re-Anchor Root Reference Frame</div>
                   <div className="text-[10px] text-slate-400">
-                    Capture current camera view as the new reference frame (PRD Sec 17)
+                    Clears keyframe chain and captures current camera view as new root anchor (F₀)
                   </div>
                 </div>
                 <button
@@ -343,10 +514,263 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onSetCurrentAsReference();
                     onClose();
                   }}
-                  className="bg-sky-700 hover:bg-sky-600 text-white font-medium px-3 py-1.5 rounded transition"
+                  className="bg-sky-700 hover:bg-sky-600 text-white font-medium px-3 py-1.5 rounded transition whitespace-nowrap"
                 >
-                  Set Now
+                  Re-Anchor Now
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* Camera Calibration Profile (PRD Section 9, 13, 38) */}
+          {activeSection === 'calib' && (
+            <div className="space-y-4">
+              <div className="bg-slate-950/60 p-3 rounded-lg border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="font-semibold text-slate-200 text-xs">
+                    Camera Calibration Profile (CP PLUS / Speed Dome)
+                  </div>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-950 text-sky-300 font-mono border border-sky-500/40">
+                    PRD SEC-13
+                  </span>
+                </div>
+                <select
+                  value={cameraCalibration?.calibrationId}
+                  onChange={(e) => {
+                    const found = DEFAULT_CAMERA_CALIBRATIONS.find((c) => c.calibrationId === e.target.value);
+                    if (found && onUpdateCameraCalibration) onUpdateCameraCalibration(found);
+                  }}
+                  className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-sky-500"
+                >
+                  {DEFAULT_CAMERA_CALIBRATIONS.map((c) => (
+                    <option key={c.calibrationId} value={c.calibrationId}>
+                      {c.cameraModel} ({c.calibrationId})
+                    </option>
+                  ))}
+                </select>
+                <div className="text-[10px] text-slate-400 font-mono">
+                  {cameraCalibration?.notes || 'Versioned optical calibration profile.'}
+                </div>
+              </div>
+
+              {/* Physical Offsets & Mounting */}
+              <div className="bg-slate-950/60 p-3 rounded-lg border border-slate-800 space-y-3 font-mono">
+                <div className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">
+                  Physical Offsets &amp; Geometry
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] text-slate-400 block mb-1">
+                      Pan Zero Offset (deg)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={cameraCalibration?.panZeroOffsetDeg ?? 0}
+                      onChange={(e) =>
+                        onUpdateCameraCalibration &&
+                        onUpdateCameraCalibration({
+                          ...cameraCalibration,
+                          panZeroOffsetDeg: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 text-xs focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-400 block mb-1">
+                      Tilt Zero Offset (deg)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={cameraCalibration?.tiltZeroOffsetDeg ?? 0}
+                      onChange={(e) =>
+                        onUpdateCameraCalibration &&
+                        onUpdateCameraCalibration({
+                          ...cameraCalibration,
+                          tiltZeroOffsetDeg: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 text-xs focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-400 block mb-1">
+                      Mounting Height (meters)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={cameraCalibration?.mountingHeightMeters ?? 14.5}
+                      onChange={(e) =>
+                        onUpdateCameraCalibration &&
+                        onUpdateCameraCalibration({
+                          ...cameraCalibration,
+                          mountingHeightMeters: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 text-xs focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-400 block mb-1">
+                      Roll Correction (deg)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={cameraCalibration?.rollOffsetDeg ?? 0}
+                      onChange={(e) =>
+                        onUpdateCameraCalibration &&
+                        onUpdateCameraCalibration({
+                          ...cameraCalibration,
+                          rollOffsetDeg: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 text-xs focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
+                </div>
+
+                {/* Geographic Anchor when available */}
+                {cameraCalibration?.cameraGeo && (
+                  <div className="pt-2 border-t border-slate-800 text-[10px] text-slate-400 space-y-1">
+                    <span className="text-slate-300 font-semibold block">Geographic Mast Coordinates:</span>
+                    <div>Lat: {cameraCalibration.cameraGeo.lat.toFixed(5)}° • Lng: {cameraCalibration.cameraGeo.lng.toFixed(5)}°</div>
+                    <div>Elevation: {cameraCalibration.cameraGeo.altMeters}m MSL • Boresight Heading: {cameraCalibration.cameraGeo.headingDeg}°</div>
+                  </div>
+                )}
+              </div>
+
+              {/* Optical Zoom-to-FOV Lookup Table */}
+              <div className="bg-slate-950/60 p-3 rounded-lg border border-slate-800 space-y-2">
+                <div className="text-[11px] font-bold text-slate-300 uppercase tracking-wider font-mono">
+                  Optical Zoom-to-FOV Calibration Table
+                </div>
+                <div className="grid grid-cols-4 gap-1 text-[10px] font-mono text-center bg-slate-900/80 p-1.5 rounded border border-slate-800">
+                  <span className="font-bold text-slate-400">Zoom</span>
+                  <span className="font-bold text-sky-400">FOV H</span>
+                  <span className="font-bold text-amber-400">FOV V</span>
+                  <span className="font-bold text-slate-400">Type</span>
+                  {cameraCalibration?.zoomFovTable?.slice(0, 5).map((row, i) => (
+                    <React.Fragment key={i}>
+                      <span className="text-slate-200">{row.zoom.toFixed(1)}x</span>
+                      <span className="text-sky-300">{row.fovH.toFixed(1)}°</span>
+                      <span className="text-amber-300">{row.fovV.toFixed(1)}°</span>
+                      <span className="text-slate-500">Optical</span>
+                    </React.Fragment>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* PTZ Revisit & Tolerances Settings (PRD Section 26 & 27) */}
+          {activeSection === 'tolerances' && (
+            <div className="space-y-4">
+              <div className="bg-slate-950/60 p-3 rounded-lg border border-slate-800 space-y-3 font-mono">
+                <div className="flex items-center justify-between">
+                  <div className="font-semibold text-slate-200 text-xs">
+                    PTZ Revisit &amp; Angle Tolerances
+                  </div>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-500/40">
+                    PRD SEC-27
+                  </span>
+                </div>
+                <p className="text-[10px] text-slate-400">
+                  Defines the spherical angular envelope for detecting when the camera has returned near a stored exercise tag to trigger CV visual refinement.
+                </p>
+
+                <div className="space-y-3 pt-2">
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-400">Pan Angle Tolerance</span>
+                      <span className="text-sky-400 font-bold">±{ptzTolerances.panToleranceDeg.toFixed(1)}°</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="1.0"
+                      max="10.0"
+                      step="0.5"
+                      value={ptzTolerances.panToleranceDeg}
+                      onChange={(e) =>
+                        onUpdatePtzTolerances &&
+                        onUpdatePtzTolerances({
+                          ...ptzTolerances,
+                          panToleranceDeg: parseFloat(e.target.value),
+                        })
+                      }
+                      className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-400">Tilt Angle Tolerance</span>
+                      <span className="text-amber-400 font-bold">±{ptzTolerances.tiltToleranceDeg.toFixed(1)}°</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="6.0"
+                      step="0.5"
+                      value={ptzTolerances.tiltToleranceDeg}
+                      onChange={(e) =>
+                        onUpdatePtzTolerances &&
+                        onUpdatePtzTolerances({
+                          ...ptzTolerances,
+                          tiltToleranceDeg: parseFloat(e.target.value),
+                        })
+                      }
+                      className="w-full accent-amber-400 h-1.5 bg-slate-800 rounded"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-400">Zoom Factor Tolerance</span>
+                      <span className="text-emerald-400 font-bold">±{ptzTolerances.zoomTolerance.toFixed(1)}x</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="4.0"
+                      step="0.25"
+                      value={ptzTolerances.zoomTolerance}
+                      onChange={(e) =>
+                        onUpdatePtzTolerances &&
+                        onUpdatePtzTolerances({
+                          ...ptzTolerances,
+                          zoomTolerance: parseFloat(e.target.value),
+                        })
+                      }
+                      className="w-full accent-emerald-400 h-1.5 bg-slate-800 rounded"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-400">Telemetry Stale Timeout</span>
+                      <span className="text-slate-200 font-bold">{ptzTolerances.telemetryTimeoutMs}ms</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="500"
+                      max="5000"
+                      step="250"
+                      value={ptzTolerances.telemetryTimeoutMs}
+                      onChange={(e) =>
+                        onUpdatePtzTolerances &&
+                        onUpdatePtzTolerances({
+                          ...ptzTolerances,
+                          telemetryTimeoutMs: parseInt(e.target.value),
+                        })
+                      }
+                      className="w-full accent-slate-400 h-1.5 bg-slate-800 rounded"
+                    />
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -462,6 +886,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       })
                     }
                     className="w-5 h-5 accent-sky-500 rounded ml-3"
+                  />
+                </label>
+              </div>
+
+              {/* Persistent Simulation Watermark (PRD Section 36) */}
+              <div className="bg-slate-950/80 border border-slate-700/80 rounded-lg p-3">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <div>
+                    <div className="text-slate-100 font-semibold text-xs flex items-center gap-2">
+                      <span>Persistent Simulation Watermark</span>
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded font-bold bg-amber-950/80 border border-amber-500/40 text-amber-300">
+                        PRD SEC-36
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Displays explicit "SIMULATED / EXERCISE USE ONLY • NOT VERIFIED TARGETS" warning watermark banner across video viewport.
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={overlaySettings.showWatermark !== false}
+                    onChange={(e) =>
+                      onUpdateOverlaySettings({
+                        ...overlaySettings,
+                        showWatermark: e.target.checked,
+                      })
+                    }
+                    className="w-5 h-5 accent-amber-500 rounded ml-3"
                   />
                 </label>
               </div>

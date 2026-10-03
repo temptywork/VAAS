@@ -4,12 +4,15 @@ import {
   ExerciseBoundary,
   BoundaryPoint,
   BoundaryConfig,
+  CameraCalibration,
   CameraConfig,
   FeatureType,
   OverlaySettings,
+  PtzTolerances,
   RegistrationMetrics,
   RegistrationSettings,
   ScenarioData,
+  SystemLayers,
   VideoSourceType,
 } from './types';
 import { VisualRegistrationEngine } from './cv/registrationEngine';
@@ -18,14 +21,25 @@ import { Toolbar } from './components/Toolbar';
 import { StatusBar } from './components/StatusBar';
 import { FullscreenRibbon } from './components/FullscreenRibbon';
 import { AddFeatureModal, CustomPlacementOptions } from './components/AddFeatureModal';
+import { CustomImageModal } from './components/CustomImageModal';
+import { CustomSvgModal } from './components/CustomSvgModal';
+import { LayersDrawer } from './components/LayersDrawer';
 import { BoundaryConfigModal } from './components/BoundaryConfigModal';
 import { ScenarioModal } from './components/ScenarioModal';
 import { SettingsModal } from './components/SettingsModal';
 import { ExerciseSimulatorControls } from './components/ExerciseSimulatorControls';
 import { DiagnosticsDrawer } from './components/DiagnosticsDrawer';
 import { DEFAULT_SCENARIOS } from './data/defaultScenarios';
+import { DEFAULT_CAMERA_CALIBRATIONS } from './data/cameraCalibrations';
 import { ExerciseTerrainRenderer, SimulatorCameraState } from './components/ExerciseTerrainRenderer';
 import { FEATURE_LIBRARY } from './data/featureDefinitions';
+import { OnvifPtzControlPanel } from './components/OnvifPtzControlPanel';
+import { FfmpegStreamModal } from './components/FfmpegStreamModal';
+import { PtzSpatialMemoryDrawer } from './components/PtzSpatialMemoryDrawer';
+import { onvifService } from './services/onvifService';
+import { ffmpegService } from './services/ffmpegService';
+import { PtzAnchor } from './types';
+import { screenToPtzAnchor } from './utils/ptzMath';
 
 export default function App() {
   // Visual Registration CV Engine Instance
@@ -34,6 +48,7 @@ export default function App() {
   const cvTerrainRendererRef = useRef<ExerciseTerrainRenderer>(new ExerciseTerrainRenderer());
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const activeStreamRef = useRef<MediaStream | null>(null);
+  const ffmpegStreamImgRef = useRef<HTMLImageElement | null>(null);
 
   // Camera & Stream State
   const [sourceType, setSourceType] = useState<VideoSourceType>('simulator');
@@ -46,6 +61,12 @@ export default function App() {
   const [isConnected, setIsConnected] = useState<boolean>(true);
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
 
+  // ONVIF & PTZ State
+  const [isOnvifPanelOpen, setIsOnvifPanelOpen] = useState<boolean>(true);
+  const [isPtzMemoryOpen, setIsPtzMemoryOpen] = useState<boolean>(false);
+  const [isFfmpegModalOpen, setIsFfmpegModalOpen] = useState<boolean>(false);
+  const [onvifStatus, setOnvifStatus] = useState(onvifService.getStatus());
+
   // Simulator Camera PTZ State
   const [simState, setSimState] = useState<SimulatorCameraState>({
     panX: 0,
@@ -56,12 +77,19 @@ export default function App() {
     flirThermal: false,
     autoPatrol: false,
   });
+  const simStateRef = useRef<SimulatorCameraState>(simState);
+  useEffect(() => {
+    simStateRef.current = simState;
+  }, [simState]);
 
   // Exercise Overlay Features & Boundaries (Loaded with Exercise Crimson Shield initial setup)
   const [scenarioName, setScenarioName] = useState<string>(DEFAULT_SCENARIOS[0].scenario_name);
   const [features, setFeatures] = useState<ExerciseFeature[]>(() =>
     DEFAULT_SCENARIOS[0].features.map((f) => ({
       ...f,
+      x: f.x ?? f.pixel_x ?? 0,
+      y: f.y ?? f.pixel_y ?? 0,
+      layer: (f.layer as any) || 'symbols',
       visible: true,
       createdAt: Date.now(),
     }))
@@ -151,6 +179,10 @@ export default function App() {
     leastSquaresRefine: true,
     adaptiveReference: false,
     updateIntervalMs: 33,
+    motionModel: 'HYBRID',
+    enableKeyframeChaining: true,
+    adaptiveCornerFiltering: true,
+    orientedOrbDescriptors: true,
   });
 
   const [overlaySettings, setOverlaySettings] = useState<OverlaySettings>({
@@ -166,16 +198,40 @@ export default function App() {
     showMatchVectors: false,
     showHUD: true,
     flirThermalMode: false,
+    showWatermark: true,
   });
 
   // Modals & Drawers
   const [isAddFeatureOpen, setIsAddFeatureOpen] = useState<boolean>(false);
+  const [isCustomImageOpen, setIsCustomImageOpen] = useState<boolean>(false);
+  const [isCustomSvgOpen, setIsCustomSvgOpen] = useState<boolean>(false);
+  const [isLayersDrawerOpen, setIsLayersDrawerOpen] = useState<boolean>(false);
   const [scenarioModalMode, setScenarioModalMode] = useState<'save' | 'load' | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
   const [showSimControls, setShowSimControls] = useState<boolean>(true);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [isScenarioModified, setIsScenarioModified] = useState<boolean>(false);
   const appContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Camera Calibration & PTZ Tolerances (PRD Section 13, 26, 27)
+  const [cameraCalibration, setCameraCalibration] = useState<CameraCalibration>(DEFAULT_CAMERA_CALIBRATIONS[0]);
+  const [ptzTolerances, setPtzTolerances] = useState<PtzTolerances>({
+    panToleranceDeg: 3.5,
+    tiltToleranceDeg: 2.0,
+    zoomTolerance: 1.5,
+    visualThreshold: 8,
+    telemetryTimeoutMs: 2500,
+  });
+
+  // System Layer Management (PRD Section 21)
+  const [systemLayers, setSystemLayers] = useState<SystemLayers>({
+    baseVideo: { visible: true, opacity: 1.0 },
+    boundary: { visible: true, opacity: 0.9 },
+    symbols: { visible: true, opacity: 0.95 },
+    labels: { visible: true, opacity: 1.0 },
+    status: { visible: true, opacity: 0.9 },
+  });
 
   // Toggle Fullscreen / Maximize Screen
   const handleToggleFullscreen = useCallback(() => {
@@ -257,6 +313,28 @@ export default function App() {
     cvCanvasRef.current = cvCanvas;
   }, []);
 
+  // Pre-load FFmpeg stream image for CV frame processing
+  useEffect(() => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src = '/api/ffmpeg/stream';
+    ffmpegStreamImgRef.current = img;
+  }, []);
+
+  // Synchronize ONVIF PTZ with Simulator state
+  useEffect(() => {
+    const unsub = onvifService.subscribe((s) => {
+      setOnvifStatus(s);
+      setSimState((prev) => ({
+        ...prev,
+        panX: (s.ptzStatus.pan / 60) * 350,
+        tiltY: (s.ptzStatus.tilt / 35) * 180,
+        zoom: Math.max(0.6, Math.min(3.0, s.ptzStatus.zoom)),
+      }));
+    });
+    return unsub;
+  }, []);
+
   // Handle Webcam and Mobile Rear Camera Source Switch
   useEffect(() => {
     let currentStream: MediaStream | null = null;
@@ -302,6 +380,16 @@ export default function App() {
             videoEl.play().catch((e) => console.warn('Video play error:', e));
             videoElementRef.current = videoEl;
             setVideoElement(videoEl);
+
+            const onActiveVideo = () => {
+              if (videoEl && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+                setTimeout(() => {
+                  captureAndSetReference();
+                }, 150);
+              }
+            };
+            videoEl.onplaying = onActiveVideo;
+            videoEl.onloadeddata = onActiveVideo;
           }
 
           // Enumerate connected cameras
@@ -328,6 +416,16 @@ export default function App() {
                 videoEl.play().catch(console.warn);
                 videoElementRef.current = videoEl;
                 setVideoElement(videoEl);
+
+                const onActiveFallback = () => {
+                  if (videoEl && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+                    setTimeout(() => {
+                      captureAndSetReference();
+                    }, 150);
+                  }
+                };
+                videoEl.onplaying = onActiveFallback;
+                videoEl.onloadeddata = onActiveFallback;
               }
             })
             .catch((fallbackErr) => {
@@ -398,7 +496,14 @@ export default function App() {
     if (!ctx) return;
 
     if (sourceType === 'simulator') {
-      cvTerrainRendererRef.current.render(ctx, 640, 360, simState);
+      cvTerrainRendererRef.current.render(ctx, 640, 360, simStateRef.current);
+    } else if (
+      sourceType === 'onvif_ffmpeg' &&
+      ffmpegStreamImgRef.current &&
+      ffmpegStreamImgRef.current.complete &&
+      ffmpegStreamImgRef.current.naturalWidth > 0
+    ) {
+      ctx.drawImage(ffmpegStreamImgRef.current, 0, 0, 640, 360);
     } else if (
       (sourceType === 'webcam' || sourceType === 'rear_camera') &&
       videoElementRef.current &&
@@ -415,7 +520,7 @@ export default function App() {
     const dataUrl = cvCanvas.toDataURL('image/jpeg', 0.85);
     const { keypointCount } = engineRef.current.setReferenceFrame(imgData, dataUrl);
     console.log(`Reference frame established with ${keypointCount} features.`);
-  }, [sourceType, simState]);
+  }, [sourceType]);
 
   // Establish initial reference frame on mount / connection
   useEffect(() => {
@@ -432,6 +537,17 @@ export default function App() {
   useEffect(() => {
     engineRef.current.settings = { ...regSettings };
   }, [regSettings]);
+
+  // Reset CV reference and tracking when switching camera source
+  useEffect(() => {
+    engineRef.current.reset();
+    setRegistrationMetrics((prev) => ({
+      ...prev,
+      quality: 'UNINITIALIZED',
+      inliers: 0,
+      totalMatches: 0,
+    }));
+  }, [sourceType]);
 
   // Main CV Processing Loop (at 30 FPS)
   useEffect(() => {
@@ -458,14 +574,35 @@ export default function App() {
       });
 
       // Render into CV canvas at 640x360
+      let hasLiveFrame = false;
       if (sourceType === 'simulator') {
-        cvTerrainRendererRef.current.render(ctx, 640, 360, simState);
+        cvTerrainRendererRef.current.render(ctx, 640, 360, simStateRef.current);
+        hasLiveFrame = true;
+      } else if (
+        sourceType === 'onvif_ffmpeg' &&
+        ffmpegStreamImgRef.current &&
+        ffmpegStreamImgRef.current.complete &&
+        ffmpegStreamImgRef.current.naturalWidth > 0
+      ) {
+        ctx.drawImage(ffmpegStreamImgRef.current, 0, 0, 640, 360);
+        hasLiveFrame = true;
       } else if (
         (sourceType === 'webcam' || sourceType === 'rear_camera') &&
         videoElementRef.current &&
-        videoElementRef.current.readyState >= 2
+        videoElementRef.current.readyState >= 2 &&
+        videoElementRef.current.videoWidth > 0
       ) {
         ctx.drawImage(videoElementRef.current, 0, 0, 640, 360);
+        hasLiveFrame = true;
+      }
+
+      if (!hasLiveFrame) return;
+
+      // Auto-establish reference frame if not initialized or if switched from another source
+      if (engineRef.current.getReferenceKeypoints().length < 4) {
+        const refImgData = ctx.getImageData(0, 0, 640, 360);
+        const refUrl = cvCanvas.toDataURL('image/jpeg', 0.85);
+        engineRef.current.setReferenceFrame(refImgData, refUrl);
       }
 
       const imgData = ctx.getImageData(0, 0, 640, 360);
@@ -475,7 +612,7 @@ export default function App() {
 
     intervalId = window.setInterval(processCVFrame, regSettings.updateIntervalMs || 33);
     return () => clearInterval(intervalId);
-  }, [isConnected, sourceType, simState, regSettings.updateIntervalMs]);
+  }, [isConnected, sourceType, regSettings.updateIntervalMs]);
 
   // Feature Placement Handler
   const handleSelectFeatureForPlacement = (
@@ -491,7 +628,7 @@ export default function App() {
     setIsDrawingBoundary(false);
   };
 
-  const handleAddFeaturePoint = (refPoint: [number, number]) => {
+  const handleAddFeaturePoint = (refPoint: [number, number], ptzAnchor?: PtzAnchor) => {
     if (!pendingFeatureType) return;
     const def = FEATURE_LIBRARY[pendingFeatureType];
     const newFeature: ExerciseFeature = {
@@ -502,18 +639,101 @@ export default function App() {
       label: pendingFeatureLabel || def?.defaultLabel || 'SIM FEATURE',
       rotation: pendingFeatureRotation,
       scale: pendingFeatureOptions.scale || 1.0,
+      opacity: pendingFeatureOptions.opacity ?? 0.95,
+      flipH: pendingFeatureOptions.flipH ?? false,
+      flipV: pendingFeatureOptions.flipV ?? false,
+      layer: pendingFeatureOptions.layer || 'symbols',
       color: pendingFeatureOptions.color || def?.color,
       customImage: pendingFeatureOptions.customImage,
       customImageType: pendingFeatureOptions.customImageType,
       visible: true,
       createdAt: Date.now(),
+      timestampStr:
+        new Date().toTimeString().split(' ')[0] +
+        '.' +
+        String(Date.now() % 1000).padStart(3, '0'),
+      ptzAnchor:
+        ptzAnchor ||
+        screenToPtzAnchor(
+          refPoint[0],
+          refPoint[1],
+          1280,
+          720,
+          onvifStatus.ptzStatus.pan,
+          onvifStatus.ptzStatus.tilt,
+          onvifStatus.ptzStatus.zoom
+        ),
     };
 
     setFeatures((prev) => [...prev, newFeature]);
     setSelectedFeatureId(newFeature.id);
+    setIsScenarioModified(true);
     setPendingFeatureType(null);
     setPendingFeatureLabel('');
     setPendingFeatureOptions({});
+  };
+
+  const handleDuplicateFeature = (feat: ExerciseFeature) => {
+    const copy: ExerciseFeature = {
+      ...feat,
+      id: `feat_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      label: `${feat.label} (COPY)`,
+      x: feat.x + 24,
+      y: feat.y + 24,
+      createdAt: Date.now(),
+      timestampStr:
+        new Date().toTimeString().split(' ')[0] +
+        '.' +
+        String(Date.now() % 1000).padStart(3, '0'),
+      locked: false,
+    };
+    setFeatures((prev) => [...prev, copy]);
+    setSelectedFeatureId(copy.id);
+    setIsScenarioModified(true);
+  };
+
+  const handleSelectImageForPlacement = (
+    label: string,
+    rotation: number,
+    options: CustomPlacementOptions & {
+      flipH?: boolean;
+      flipV?: boolean;
+      opacity?: number;
+      layer?: 'symbols' | 'labels' | 'boundary' | 'base';
+    }
+  ) => {
+    handleSelectFeatureForPlacement('custom', label, rotation, options);
+    setIsCustomImageOpen(false);
+  };
+
+  const handleSelectSvgForPlacement = (
+    label: string,
+    rotation: number,
+    options: CustomPlacementOptions & {
+      opacity?: number;
+      layer?: 'symbols' | 'labels' | 'boundary' | 'base';
+    }
+  ) => {
+    handleSelectFeatureForPlacement('custom', label, rotation, options);
+    setIsCustomSvgOpen(false);
+  };
+
+  const handleReanchorFeature = (id: string) => {
+    setFeatures((prev) =>
+      prev.map((f) => {
+        if (f.id !== id) return f;
+        const newAnchor: PtzAnchor = {
+          panDeg: onvifStatus.ptzStatus.pan,
+          tiltDeg: onvifStatus.ptzStatus.tilt,
+          placedAtPan: onvifStatus.ptzStatus.pan,
+          placedAtTilt: onvifStatus.ptzStatus.tilt,
+          placedAtZoom: onvifStatus.ptzStatus.zoom,
+          placedAtFovH: 62.0 / Math.max(0.5, onvifStatus.ptzStatus.zoom),
+          distanceMeters: 500,
+        };
+        return { ...f, ptzAnchor: newAnchor };
+      })
+    );
   };
 
   const handleToggleFeatureVisibility = (id: string) => {
@@ -675,25 +895,44 @@ export default function App() {
   const handleSaveScenario = (name: string, description: string) => {
     const refImg = engineRef.current.getReferenceImage();
     const scenario: ScenarioData = {
-      version: 1,
+      version: '2.0',
       scenario_name: name,
       description,
       created_at: new Date().toISOString(),
       camera: {
         rtsp_url: rtspUrl,
+        onvif_enabled: onvifStatus.connected,
+        profile_token: onvifStatus.deviceInfo?.model,
+        calibration_id: cameraCalibration.calibrationId,
         resolution: [1280, 720],
+        ptz: {
+          pan: onvifStatus.ptzStatus.pan,
+          tilt: onvifStatus.ptzStatus.tilt,
+          zoom: onvifStatus.ptzStatus.zoom,
+        },
       },
       features: features.map((f) => ({
         id: f.id,
         type: f.type,
         x: Math.round(f.x),
         y: Math.round(f.y),
+        pixel_x: Math.round(f.x),
+        pixel_y: Math.round(f.y),
+        pan: f.ptzAnchor?.panDeg,
+        tilt: f.ptzAnchor?.tiltDeg,
+        zoom: f.ptzAnchor?.placedAtZoom,
         label: f.label,
+        layer: f.layer || 'symbols',
         rotation: f.rotation,
         scale: f.scale,
+        opacity: f.opacity,
+        flipH: f.flipH,
+        flipV: f.flipV,
+        locked: f.locked,
         color: f.color,
         customImage: f.customImage,
         customImageType: f.customImageType,
+        ptzAnchor: f.ptzAnchor,
       })),
       boundaries: boundaries.map((b) => ({
         ...b,
@@ -713,10 +952,11 @@ export default function App() {
           }
         : boundaryConfig,
       registration: {
-        method: 'ORB_RANSAC_HOMOGRAPHY',
+        mode: regSettings.registrationMode || (onvifStatus.connected ? 'PTZ_HYBRID' : 'RTSP'),
         match_threshold: regSettings.matchRatioThreshold,
         min_inliers: regSettings.minInliers,
       },
+      calibration: cameraCalibration,
       reference_image: refImg || undefined,
     };
 
@@ -740,26 +980,37 @@ export default function App() {
     a.click();
     URL.revokeObjectURL(url);
     setScenarioName(name);
+    setIsScenarioModified(false);
   };
 
   const handleLoadScenario = (scenario: ScenarioData) => {
     setScenarioName(scenario.scenario_name);
+    if (scenario.calibration) {
+      setCameraCalibration(scenario.calibration);
+    }
     setFeatures(
       scenario.features.map((f) => ({
         id: f.id,
         type: f.type,
-        x: f.x,
-        y: f.y,
+        x: f.x ?? f.pixel_x ?? 0,
+        y: f.y ?? f.pixel_y ?? 0,
         label: f.label,
+        layer: (f.layer as any) || 'symbols',
         rotation: f.rotation || 0,
         scale: f.scale || 1.0,
+        opacity: f.opacity ?? 0.95,
+        flipH: f.flipH,
+        flipV: f.flipV,
+        locked: f.locked,
         color: f.color,
-        customImage: f.customImage,
+        customImage: f.customImage || f.asset,
         customImageType: f.customImageType,
         visible: true,
         createdAt: Date.now(),
+        ptzAnchor: f.ptzAnchor,
       }))
     );
+    setIsScenarioModified(false);
 
     if (scenario.boundaries && scenario.boundaries.length > 0) {
       setBoundaries(scenario.boundaries.map((b) => ({ ...b, visible: b.visible !== false })));
@@ -862,6 +1113,9 @@ export default function App() {
           onToggleAllLayers={handleToggleAllLayers}
           onOpenBoundaryConfig={() => setIsBoundaryConfigOpen(true)}
           onOpenAddFeature={() => setIsAddFeatureOpen(true)}
+          onOpenCustomImage={() => setIsCustomImageOpen(true)}
+          onOpenCustomSvg={() => setIsCustomSvgOpen(true)}
+          onOpenLayersDrawer={() => setIsLayersDrawerOpen(true)}
           onOpenSaveScenario={() => setScenarioModalMode('save')}
           onOpenLoadScenario={() => setScenarioModalMode('load')}
           onSetCurrentAsReference={captureAndSetReference}
@@ -878,6 +1132,15 @@ export default function App() {
           onOpenSettings={() => setIsSettingsOpen(true)}
           registrationQuality={registrationMetrics.quality}
           hasReference={registrationMetrics.quality !== 'UNINITIALIZED'}
+          onOpenOnvifPtz={() => setIsOnvifPanelOpen((prev) => !prev)}
+          onOpenPtzMemory={() => setIsPtzMemoryOpen((prev) => !prev)}
+          onOpenFfmpegHub={() => setIsFfmpegModalOpen(true)}
+          isOnvifOpen={isOnvifPanelOpen}
+          isPtzMemoryOpen={isPtzMemoryOpen}
+          ptzPan={onvifStatus.ptzStatus.pan}
+          ptzTilt={onvifStatus.ptzStatus.tilt}
+          ptzZoom={onvifStatus.ptzStatus.zoom}
+          onvifConnected={onvifStatus.connected}
         />
       )}
 
@@ -911,9 +1174,42 @@ export default function App() {
             setFeatures((prev) => prev.filter((f) => f.id !== id));
             setSelectedFeatureId(null);
           }}
+          onDuplicateFeature={handleDuplicateFeature}
           registrationMetrics={registrationMetrics}
           overlaySettings={overlaySettings}
           videoElement={videoElement}
+          ptzPan={onvifStatus.ptzStatus.pan}
+          ptzTilt={onvifStatus.ptzStatus.tilt}
+          ptzZoom={onvifStatus.ptzStatus.zoom}
+          onvifConnected={onvifStatus.connected}
+          onSlewToObject={(pan, tilt, zoom) => onvifService.absoluteMove(pan, tilt, zoom)}
+        />
+
+        {/* Floating ONVIF PTZ Controls */}
+        <OnvifPtzControlPanel
+          isOpen={isOnvifPanelOpen}
+          onClose={() => setIsOnvifPanelOpen(false)}
+          onOpenFfmpegModal={() => setIsFfmpegModalOpen(true)}
+          onOpenPtzMemoryDrawer={() => setIsPtzMemoryOpen(true)}
+          currentCamPan={onvifStatus.ptzStatus.pan}
+          currentCamTilt={onvifStatus.ptzStatus.tilt}
+          currentCamZoom={onvifStatus.ptzStatus.zoom}
+          onSyncCameraPtz={(pan, tilt, zoom) => onvifService.absoluteMove(pan, tilt, zoom)}
+        />
+
+        {/* Floating PTZ Spatial Memory Registry & 360° Radar Dome */}
+        <PtzSpatialMemoryDrawer
+          isOpen={isPtzMemoryOpen}
+          onClose={() => setIsPtzMemoryOpen(false)}
+          features={features}
+          currentCamPan={onvifStatus.ptzStatus.pan}
+          currentCamTilt={onvifStatus.ptzStatus.tilt}
+          currentCamZoom={onvifStatus.ptzStatus.zoom}
+          onSlewToObject={(pan, tilt, zoom) => onvifService.absoluteMove(pan, tilt, zoom)}
+          onReanchorFeature={handleReanchorFeature}
+          onDeleteFeature={(id) => setFeatures((prev) => prev.filter((f) => f.id !== id))}
+          onSelectFeature={(id) => setSelectedFeatureId(id)}
+          selectedFeatureId={selectedFeatureId}
         />
 
         {/* Floating Simulator PTZ Controls (when in Simulator mode) */}
@@ -972,6 +1268,7 @@ export default function App() {
         <StatusBar
           sourceType={sourceType}
           isConnected={isConnected}
+          onvifConnected={onvifStatus.connected}
           registrationMetrics={registrationMetrics}
           featureCount={features.length}
           boundariesCount={boundaries.length}
@@ -985,6 +1282,13 @@ export default function App() {
           onToggleAllLayers={handleToggleAllLayers}
           onToggleFullscreen={handleToggleFullscreen}
           onOpenSettings={() => setIsSettingsOpen(true)}
+          ptzCoordinates={onvifStatus.ptzStatus}
+          scenarioName={scenarioName}
+          isScenarioModified={isScenarioModified}
+          registrationMode={
+            regSettings.registrationMode ||
+            (onvifStatus.connected ? 'PTZ + VISUAL' : 'RTSP VISUAL')
+          }
         />
       )}
 
@@ -1006,6 +1310,29 @@ export default function App() {
           setFeatures([]);
           setSelectedFeatureId(null);
         }}
+      />
+
+      <CustomImageModal
+        isOpen={isCustomImageOpen}
+        onClose={() => setIsCustomImageOpen(false)}
+        onSelectImageForPlacement={handleSelectImageForPlacement}
+      />
+
+      <CustomSvgModal
+        isOpen={isCustomSvgOpen}
+        onClose={() => setIsCustomSvgOpen(false)}
+        onSelectSvgForPlacement={handleSelectSvgForPlacement}
+      />
+
+      <LayersDrawer
+        isOpen={isLayersDrawerOpen}
+        onClose={() => setIsLayersDrawerOpen(false)}
+        systemLayers={systemLayers}
+        onUpdateSystemLayers={setSystemLayers}
+        overlaySettings={overlaySettings}
+        onUpdateOverlaySettings={setOverlaySettings}
+        featureCount={features.length}
+        boundaryCount={boundaries.length}
       />
 
       <BoundaryConfigModal
@@ -1065,6 +1392,16 @@ export default function App() {
         isTorchOn={isTorchOn}
         hasTorchSupport={hasTorchSupport}
         onToggleTorch={handleToggleTorch}
+      />
+
+      <FfmpegStreamModal
+        isOpen={isFfmpegModalOpen}
+        onClose={() => setIsFfmpegModalOpen(false)}
+        onSelectAsSource={() => {
+          setSourceType('onvif_ffmpeg');
+          setIsConnected(true);
+          setTimeout(() => captureAndSetReference(), 300);
+        }}
       />
     </div>
   );

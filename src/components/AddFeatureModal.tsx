@@ -25,6 +25,10 @@ export interface CustomPlacementOptions {
   customImageType?: 'svg' | 'jpg' | 'png' | 'other';
   scale?: number;
   color?: string;
+  opacity?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  layer?: 'symbols' | 'labels' | 'boundary' | 'base';
 }
 
 interface AddFeatureModalProps {

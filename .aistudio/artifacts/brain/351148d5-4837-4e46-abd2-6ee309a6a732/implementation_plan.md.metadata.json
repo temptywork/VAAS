@@ -1,0 +1,6 @@
+{
+  "summary":  "Comprehensive architectural plan for upgrading the visual homography pipeline with Oriented ORB descriptors, Hartley-normalized DLT + MSAC + Huber IRLS, automatic keyframe chaining with loop closure, adaptive 4-corner velocity filtering, and user-selectable motion models.",
+  "updatedAt":  "2026-10-03T17:29:56.221821784Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

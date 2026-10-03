@@ -5,7 +5,8 @@ export interface Keypoint {
   x: number;
   y: number;
   score: number;
-  descriptor: Uint32Array; // 4 x 32-bit = 128-bit binary descriptor
+  angle: number; // Dominant patch orientation in radians [-pi, pi]
+  descriptor: Uint32Array; // 4 x 32-bit = 128-bit steered ORB binary descriptor
 }
 
 // 16-pixel Bresenham circle offsets around center (x, y)
@@ -16,8 +17,23 @@ const CIRCLE_OFFSETS: [number, number][] = [
   [-3, 0],  [-1, -3], [-2, -2], [-1, -3]
 ];
 
+// Circular patch offsets for fast Intensity Centroid orientation (ORB)
+const ORIENTATION_OFFSETS: [number, number][] = [];
+(function initOrientationOffsets() {
+  const radius = 11;
+  const rSq = radius * radius;
+  for (let dy = -radius; dy <= radius; dy += 2) {
+    for (let dx = -radius; dx <= radius; dx += 2) {
+      if (dx === 0 && dy === 0) continue;
+      if (dx * dx + dy * dy <= rSq) {
+        ORIENTATION_OFFSETS.push([dx, dy]);
+      }
+    }
+  }
+})();
+
 // Fixed pseudo-random Gaussian-distributed sampling pattern for 128-bit BRIEF-style descriptor
-// 128 pairs of (dx1, dy1) and (dx2, dy2) within a 31x31 patch
+// 128 pairs of (dx1, dy1) and (dx2, dy2) within a circular patch so rotation stays in-bounds
 const BRIEF_PAIRS: [number, number, number, number][] = [];
 (function initBriefPairs() {
   // Deterministic PRNG for reproducible test vectors
@@ -30,14 +46,14 @@ const BRIEF_PAIRS: [number, number, number, number][] = [];
     const u1 = Math.max(1e-7, rnd());
     const u2 = rnd();
     const z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
-    return Math.max(-14, Math.min(14, Math.round(z * sd)));
+    return Math.max(-11, Math.min(11, Math.round(z * sd)));
   }
 
   for (let i = 0; i < 128; i++) {
-    const x1 = gaussian(6.5);
-    const y1 = gaussian(6.5);
-    const x2 = gaussian(6.5);
-    const y2 = gaussian(6.5);
+    const x1 = gaussian(5.5);
+    const y1 = gaussian(5.5);
+    const x2 = gaussian(5.5);
+    const y2 = gaussian(5.5);
     BRIEF_PAIRS.push([x1, y1, x2, y2]);
   }
 })();
@@ -55,25 +71,69 @@ export function rgbaToGrayscale(rgba: Uint8ClampedArray, width: number, height: 
 }
 
 /**
- * Detect feature keypoints using FAST-9 corner detector and compute 128-bit BRIEF descriptors
+ * 5-pixel cross filter to suppress high-frequency CMOS sensor noise in webcam video
+ */
+function getSmoothedIntensity(gray: Uint8Array, width: number, x: number, y: number): number {
+  const idx = y * width + x;
+  return (gray[idx] * 4 + gray[idx - 1] + gray[idx + 1] + gray[idx - width] + gray[idx + width]) >> 3;
+}
+
+/**
+ * Compute dominant orientation angle in radians using circular intensity centroid (ORB)
+ */
+function computeKeypointOrientation(gray: Uint8Array, width: number, x: number, y: number): number {
+  let m10 = 0;
+  let m01 = 0;
+  for (let i = 0; i < ORIENTATION_OFFSETS.length; i++) {
+    const [dx, dy] = ORIENTATION_OFFSETS[i];
+    const intensity = gray[(y + dy) * width + (x + dx)];
+    m10 += dx * intensity;
+    m01 += dy * intensity;
+  }
+  return Math.atan2(m01, m10);
+}
+
+/**
+ * Detect feature keypoints using FAST-9 corner detector and compute 128-bit Oriented ORB descriptors
  */
 export function detectFeatures(
   gray: Uint8Array,
   width: number,
   height: number,
-  maxFeatures = 200,
-  fastThreshold = 22
+  maxFeatures = 240,
+  fastThreshold = 20,
+  oriented = true
 ): Keypoint[] {
-  const keypoints: Keypoint[] = [];
+  // First attempt with requested threshold
+  let keypoints = runFastDetection(gray, width, height, maxFeatures, fastThreshold, oriented);
+
+  // Adaptive fallback: if room or lighting is soft/low-contrast and produced too few points, run with lower threshold
+  if (keypoints.length < 35 && fastThreshold > 11) {
+    keypoints = runFastDetection(gray, width, height, maxFeatures, 11, oriented);
+  }
+
+  return keypoints;
+}
+
+function runFastDetection(
+  gray: Uint8Array,
+  width: number,
+  height: number,
+  maxFeatures: number,
+  threshold: number,
+  oriented: boolean
+): Keypoint[] {
   const border = 16;
   const gridW = 16;
   const gridH = 12;
   const cellW = Math.floor((width - 2 * border) / gridW);
   const cellH = Math.floor((height - 2 * border) / gridH);
 
-  // We enforce spatial binning so keypoints are uniformly spread across the scene,
-  // preventing all features from crowding in a single high-contrast corner.
-  const bins: Keypoint[][] = Array.from({ length: gridW * gridH }, () => []);
+  // Spatial bins hold candidate corner coordinates and scores before descriptor extraction
+  const bins: { x: number; y: number; score: number }[][] = Array.from(
+    { length: gridW * gridH },
+    () => []
+  );
 
   // FAST-9 Corner Detection
   for (let y = border; y < height - border; y += 2) {
@@ -89,7 +149,7 @@ export function detectFeatures(
 
       let brighterCount = 0;
       let darkerCount = 0;
-      const t = fastThreshold;
+      const t = threshold;
 
       if (p0 > p + t) brighterCount++; else if (p0 < p - t) darkerCount++;
       if (p4 > p + t) brighterCount++; else if (p4 < p - t) darkerCount++;
@@ -102,7 +162,6 @@ export function detectFeatures(
       let isCorner = false;
       let score = 0;
 
-      // Check contiguous arc of 9 pixels
       const ringVals: number[] = new Array(16);
       for (let k = 0; k < 16; k++) {
         const ox = CIRCLE_OFFSETS[k][0];
@@ -110,7 +169,6 @@ export function detectFeatures(
         ringVals[k] = gray[(y + oy) * width + (x + ox)];
       }
 
-      // Check for 9 contiguous brighter or darker
       for (let start = 0; start < 16; start++) {
         let allB = true;
         let allD = true;
@@ -129,29 +187,16 @@ export function detectFeatures(
       }
 
       if (isCorner) {
-        // Compute 128-bit BRIEF descriptor (4 uint32 integers)
-        const descriptor = new Uint32Array(4);
-        for (let b = 0; b < 128; b++) {
-          const [dx1, dy1, dx2, dy2] = BRIEF_PAIRS[b];
-          const v1 = gray[(y + dy1) * width + (x + dx1)];
-          const v2 = gray[(y + dy2) * width + (x + dx2)];
-          if (v1 < v2) {
-            const wordIdx = b >> 5; // b / 32
-            const bitIdx = b & 31;  // b % 32
-            descriptor[wordIdx] |= (1 << bitIdx);
-          }
-        }
-
         const binX = Math.min(gridW - 1, Math.max(0, Math.floor((x - border) / cellW)));
         const binY = Math.min(gridH - 1, Math.max(0, Math.floor((y - border) / cellH)));
         const binIdx = binY * gridW + binX;
-
-        bins[binIdx].push({ x, y, score, descriptor });
+        bins[binIdx].push({ x, y, score });
       }
     }
   }
 
-  // Pick top keypoints per bin to guarantee spatial coverage
+  // Pick top candidates per bin to guarantee uniform spatial coverage across the frame
+  const selectedCandidates: { x: number; y: number; score: number }[] = [];
   const maxPerBin = Math.max(1, Math.ceil(maxFeatures / (gridW * gridH)));
   for (let i = 0; i < bins.length; i++) {
     const bin = bins[i];
@@ -159,15 +204,50 @@ export function detectFeatures(
       bin.sort((a, b) => b.score - a.score);
       const take = Math.min(bin.length, maxPerBin);
       for (let j = 0; j < take; j++) {
-        keypoints.push(bin[j]);
+        selectedCandidates.push(bin[j]);
       }
     }
   }
 
-  // If still room, backfill by global score
-  if (keypoints.length > maxFeatures) {
-    keypoints.sort((a, b) => b.score - a.score);
-    return keypoints.slice(0, maxFeatures);
+  if (selectedCandidates.length > maxFeatures) {
+    selectedCandidates.sort((a, b) => b.score - a.score);
+    selectedCandidates.length = maxFeatures;
+  }
+
+  // Compute Oriented ORB angle and steered 128-bit BRIEF descriptors on selected keypoints
+  const keypoints: Keypoint[] = new Array(selectedCandidates.length);
+  for (let i = 0; i < selectedCandidates.length; i++) {
+    const { x, y, score } = selectedCandidates[i];
+    const angle = oriented ? computeKeypointOrientation(gray, width, x, y) : 0;
+    const cosA = oriented ? Math.cos(angle) : 1;
+    const sinA = oriented ? Math.sin(angle) : 0;
+
+    const descriptor = new Uint32Array(4);
+    for (let b = 0; b < 128; b++) {
+      const [dx1, dy1, dx2, dy2] = BRIEF_PAIRS[b];
+      const rx1 = oriented
+        ? Math.max(-14, Math.min(14, Math.round(dx1 * cosA - dy1 * sinA)))
+        : dx1;
+      const ry1 = oriented
+        ? Math.max(-14, Math.min(14, Math.round(dx1 * sinA + dy1 * cosA)))
+        : dy1;
+      const rx2 = oriented
+        ? Math.max(-14, Math.min(14, Math.round(dx2 * cosA - dy2 * sinA)))
+        : dx2;
+      const ry2 = oriented
+        ? Math.max(-14, Math.min(14, Math.round(dx2 * sinA + dy2 * cosA)))
+        : dy2;
+
+      const v1 = getSmoothedIntensity(gray, width, x + rx1, y + ry1);
+      const v2 = getSmoothedIntensity(gray, width, x + rx2, y + ry2);
+      if (v1 < v2) {
+        const wordIdx = b >> 5;
+        const bitIdx = b & 31;
+        descriptor[wordIdx] |= (1 << bitIdx);
+      }
+    }
+
+    keypoints[i] = { x, y, score, angle, descriptor };
   }
 
   return keypoints;

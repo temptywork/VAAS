@@ -1,0 +1,65 @@
+import { CameraCalibration } from '../types';
+
+export const DEFAULT_CAMERA_CALIBRATIONS: CameraCalibration[] = [
+  {
+    calibrationId: 'CP-PLUS-SD49225-v2.0',
+    cameraModel: 'CP PLUS Speed Dome CP-VNP-D2121L20 / SD49225',
+    panZeroOffsetDeg: 0.0,
+    tiltZeroOffsetDeg: -1.2,
+    rollOffsetDeg: 0.0,
+    mountingHeightMeters: 14.5,
+    zoomFovTable: [
+      { zoom: 1.0, fovH: 62.8, fovV: 37.9 },
+      { zoom: 2.0, fovH: 33.4, fovV: 19.3 },
+      { zoom: 5.0, fovH: 13.6, fovV: 7.7 },
+      { zoom: 10.0, fovH: 6.8, fovV: 3.8 },
+      { zoom: 20.0, fovH: 3.4, fovV: 1.9 },
+      { zoom: 25.0, fovH: 2.7, fovV: 1.5 },
+      { zoom: 30.0, fovH: 2.2, fovV: 1.2 },
+    ],
+    cameraGeo: {
+      lat: 31.9542,
+      lng: -81.6038,
+      altMeters: 45.0,
+      headingDeg: 38.6,
+    },
+    notes: 'Calibrated for CP PLUS high-speed PTZ dome. Zero encoder aligned north.',
+  },
+  {
+    calibrationId: 'CP-PLUS-VNP-T4131-v1.0',
+    cameraModel: 'CP PLUS Heavy Duty Speed Dome CP-VNP-T4131L25',
+    panZeroOffsetDeg: 1.5,
+    tiltZeroOffsetDeg: 0.0,
+    rollOffsetDeg: 0.0,
+    mountingHeightMeters: 22.0,
+    zoomFovTable: [
+      { zoom: 1.0, fovH: 59.2, fovV: 35.1 },
+      { zoom: 4.0, fovH: 15.5, fovV: 8.8 },
+      { zoom: 12.0, fovH: 5.1, fovV: 2.9 },
+      { zoom: 25.0, fovH: 2.5, fovV: 1.4 },
+      { zoom: 32.0, fovH: 1.9, fovV: 1.1 },
+    ],
+    cameraGeo: {
+      lat: 31.9610,
+      lng: -81.6120,
+      altMeters: 55.0,
+      headingDeg: 12.0,
+    },
+    notes: 'Long-range perimeter observation post mast mount.',
+  },
+  {
+    calibrationId: 'GENERIC-TACTICAL-PTZ-30X',
+    cameraModel: 'Generic Military Grade PTZ 30x Optical',
+    panZeroOffsetDeg: 0.0,
+    tiltZeroOffsetDeg: 0.0,
+    rollOffsetDeg: 0.0,
+    mountingHeightMeters: 10.0,
+    zoomFovTable: [
+      { zoom: 1.0, fovH: 62.0, fovV: 37.0 },
+      { zoom: 3.0, fovH: 21.0, fovV: 12.0 },
+      { zoom: 10.0, fovH: 6.4, fovV: 3.6 },
+      { zoom: 30.0, fovH: 2.1, fovV: 1.2 },
+    ],
+    notes: 'Standard empirical optical zoom model for tactical exercise simulation.',
+  },
+];
